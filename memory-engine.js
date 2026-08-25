@@ -1368,6 +1368,7 @@ window.MEMORY_ENGINE = (function() {
     const api = timelineApi(), timeline = ensureTimelineState(state), eventMemory = ensureEventState(state);
     let changed = false;
     const missingNodeIds = new Set(), missingSummaryIds = new Set();
+    let firstMissingMemoryIndex = -1;
     const refreshValidRefs = (record, audit) => {
       if (!audit?.valid || audit.inherited || audit.synthetic || !Array.isArray(audit.refs)) return;
       const oldLayers = (record.sourceRefs || []).map(ref => Number(ref.layer)).join(',');
@@ -1379,11 +1380,15 @@ window.MEMORY_ENGINE = (function() {
       record.endLayer = bounds.endLayer;
       changed = true;
     };
-    for (const node of timeline.nodes) {
+    for (let nodeIndex = 0; nodeIndex < timeline.nodes.length; nodeIndex++) {
+      const node = timeline.nodes[nodeIndex];
       if (!Array.isArray(node.sourceRefs) || !node.sourceRefs.length) continue;
       const audit = api?.auditRefs?.(node.sourceRefs);
       collectHistoryAudit(report, audit);
-      if (audit?.missing?.length) missingNodeIds.add(clean(node.id));
+      if (audit?.missing?.length) {
+        missingNodeIds.add(clean(node.id));
+        if (node.kind === 'memory' && firstMissingMemoryIndex < 0) firstMissingMemoryIndex = nodeIndex;
+      }
       refreshValidRefs(node, audit);
       const nextStatus = audit?.valid ? 'valid' : 'stale';
       if (node.status !== nextStatus) { node.status = nextStatus; changed = true; }
@@ -1406,7 +1411,13 @@ window.MEMORY_ENGINE = (function() {
       const firstAffectedIndex = eventMemory.small_summaries.findIndex(item =>
         removedSmallIds.has(clean(item.id)));
       if (missingNodeIds.size) {
-        const nextNodes = timeline.nodes.filter(node => !missingNodeIds.has(clean(node.id)));
+        // 后续普通人物/实体节点是在已删除楼层存在时生成的，直接保留会让 replay
+        // 跳过剩余正文，造成推进遗漏；回滚到删除点后由当前聊天中的楼层重新补齐。
+        const nextNodes = timeline.nodes.filter((node, index) => {
+          if (missingNodeIds.has(clean(node.id))) return false;
+          if (firstMissingMemoryIndex >= 0 && index > firstMissingMemoryIndex && node.kind === 'memory') return false;
+          return true;
+        });
         if (nextNodes.length !== timeline.nodes.length) {
           timeline.nodes = nextNodes;
           changed = true;

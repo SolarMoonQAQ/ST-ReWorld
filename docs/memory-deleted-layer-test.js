@@ -52,7 +52,7 @@ const sandbox = {
     }
   },
   WORLD_ENGINE_API: {
-    async callApi() { calls.push(true); return JSON.stringify({}); }
+    async callApi(prompt) { calls.push(prompt); return JSON.stringify({}); }
   }
 };
 sandbox.window = sandbox;
@@ -81,6 +81,11 @@ for (const filename of [
       sourceRefs, sourceDigest: 'old',
       personal: [{ names: ['只存在于已删除楼层的角色'], memory: { '': ['不应继续存在'] } }], entities: {},
       status: 'valid', revision: 1
+    }, {
+      id: 'memory_000002', kind: 'memory', startLayer: 3, endLayer: 4,
+      sourceRefs: sandbox.MEMORY_ENGINE_TIMELINE.captureRange(3, 4), sourceDigest: 'later',
+      personal: [{ names: ['删除楼层之后提取的人物'], memory: { '': ['需要重新补提取'] } }], entities: {},
+      status: 'valid', revision: 1
     }]
   };
   state.event_memory.small_summaries = [{
@@ -107,5 +112,9 @@ for (const filename of [
   assert.strictEqual(next.personal_memory.length, 0, '删除楼层贡献不得通过重放继续注入');
   assert.strictEqual(result.repaired, false, '纯删除清理不应报告为 AI 重建');
   assert.strictEqual(result.deleted, true, '纯删除清理应返回 deleted 标记，供界面区分 AI 修复');
+  calls.length = 0;
+  await sandbox.MEMORY_ENGINE.repairCurrentHistory();
+  assert.ok(calls.length > 0, '删除清理后仍存在的楼层应允许自动补提取');
+  assert.ok(calls.every(prompt => !prompt.includes('已删除的错误战报')), '补提取请求不得携带已删除楼层正文');
   console.log('deleted layer cleanup tests passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });
