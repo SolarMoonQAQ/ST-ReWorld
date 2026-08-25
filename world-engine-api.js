@@ -274,7 +274,10 @@ window.WORLD_ENGINE_API = (function() {
     const selectedTemperature = temperature ?? settings.temperature;
     const configuredMaxTokens = Math.max(1, parseInt(maxTokens ?? settings.maxTokens) || 65000);
     // 兼容旧设置：曾保存为 4096 的输出上限自动提升到 65000。
-    const selectedMaxTokens = configuredMaxTokens === 4096 ? 65000 : configuredMaxTokens;
+    // 仅迁移旧设置中的 4096；调用方显式传入的批次上限必须原样保留，
+    // 否则总述为控制体积传入 4096 时又会被放大到 65000。
+    const selectedMaxTokens = configuredMaxTokens === 4096 && maxTokens == null
+      ? 65000 : configuredMaxTokens;
 
     const body = {
       model: settings.model || 'gpt-3.5-turbo',

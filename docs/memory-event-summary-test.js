@@ -211,6 +211,11 @@ for (const filename of [
     longBig,
     '总述超过提示目标时必须完整接受，不得截断或拒绝'
   );
+  assert.strictEqual(
+    sandbox.MEMORY_ENGINE._test.parseResponse('这是一段没有 JSON 外壳但内容完整的阶段总述正文。', { big: {} }).bigSummary,
+    '这是一段没有 JSON 外壳但内容完整的阶段总述正文。',
+    '总述接口只返回纯正文时也必须接受'
+  );
 }
 
 {

@@ -244,7 +244,11 @@ window.MEMORY_ENGINE = (function() {
     const emptyMemory = tasks.memory
       ? '\n\n没有对应内容时分别使用 "personal_memory": [] 和 "entity_updates": []；不得省略字段。'
       : '';
-    return `${segments.join('\n\n=====\n\n')}\n\n【统一输出要求】\n只输出一个合法 JSON 对象，不要输出 Markdown、代码围栏或解释。严格按照以下完整结构返回；模板文字替换为实际内容：\n{\n  ${fields.join(',\n  ')}\n}${emptyMemory}${tone ? `\n\n【附加要求】\n${tone}` : ''}`;
+    const bigOnly = Boolean(tasks.big && !tasks.memory && !tasks.small);
+    const outputRule = bigOnly
+      ? `【统一输出要求】\n总述任务优先返回一个合法 JSON 对象，不要输出 Markdown、代码围栏或解释：\n{\n  "big_summary": "总述正文"\n}\n兼容旧接口的空字段写法为："big_summary": ""。如果接口无法稳定生成 JSON，可以只返回总述正文；本地会把整段正文作为 big_summary 接收。`
+      : `【统一输出要求】\n只输出一个合法 JSON 对象，不要输出 Markdown、代码围栏或解释。严格按照以下完整结构返回；模板文字替换为实际内容：\n{\n  ${fields.join(',\n  ')}\n}`;
+    return `${segments.join('\n\n=====\n\n')}\n\n${outputRule}${emptyMemory}${tone ? `\n\n【附加要求】\n${tone}` : ''}`;
   }
 
   function parseResponse(raw, tasks) {
@@ -252,12 +256,34 @@ window.MEMORY_ENGINE = (function() {
     let value;
     try { value = JSON.parse(text); }
     catch (_) {
+      try {
+        const tolerant = window.WORLD_ENGINE_API?.parseJSON?.(text);
+        if (tolerant && typeof tolerant === 'object') value = tolerant;
+      } catch (_) {}
+    }
+    if (value === undefined) {
+      try {
       const objectStart = text.indexOf('{'), objectEnd = text.lastIndexOf('}');
       const arrayStart = text.indexOf('['), arrayEnd = text.lastIndexOf(']');
       if (arrayStart >= 0 && arrayStart < objectStart && arrayEnd > arrayStart) value = JSON.parse(text.slice(arrayStart, arrayEnd + 1));
       else if (objectStart >= 0 && objectEnd > objectStart) value = JSON.parse(text.slice(objectStart, objectEnd + 1));
       else if (arrayStart >= 0 && arrayEnd > arrayStart) value = JSON.parse(text.slice(arrayStart, arrayEnd + 1));
+      else if (tasks.big && text) {
+        // 部分兼容模型会严格完成总述正文，却忽略最外层 JSON 包装。
+        // 总述只有一个字符串字段，此时接受纯正文，避免因包装格式失败丢弃整批结果。
+        const plain = text
+          .replace(/^big_summary\s*[:：]\s*/i, '')
+          .replace(/^总述\s*[:：]\s*/i, '')
+          .replace(/^正文\s*[:：]\s*/i, '')
+          .trim();
+        if (plain) value = { big_summary: plain };
+        else throw new Error('API 返回中没有合法 JSON 对象或数组');
+      }
       else throw new Error('API 返回中没有合法 JSON 对象或数组');
+      } catch (error) {
+        if (tasks.big && text) value = { big_summary: text };
+        else throw error;
+      }
     }
     const nameBlacklist = configuredNameBlacklist(settings());
     // 兼容 0.1.x：旧 API 只返回人物记忆数组。
