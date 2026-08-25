@@ -33,8 +33,9 @@ vm.runInNewContext(fs.readFileSync(path.resolve(__dirname, '..', 'world-engine-s
   await sandbox.WORLD_ENGINE_STORE.hydrate();
 
   let config = sandbox.extension_settings.world_engine;
-  assert.strictEqual(config.shared.apiUrl, 'memory-url');
-  assert.strictEqual(config.shared.apiKey, 'memory-key');
+  assert.strictEqual(config.version, 3);
+  assert.strictEqual(config.apiPresets.default.apiUrl, 'memory-url');
+  assert.strictEqual(config.apiPresets.default.apiKey, 'memory-key');
   assert.strictEqual(config.world.engineEnabled, true);
   assert.strictEqual(config.memory.engineEnabled, false);
   assert.strictEqual(config.world.apiUrl, undefined);
@@ -43,20 +44,32 @@ vm.runInNewContext(fs.readFileSync(path.resolve(__dirname, '..', 'world-engine-s
   sandbox.WORLD_ENGINE_STORE.setItem('world_engine_settings', JSON.stringify({
     apiUrl: 'shared-url', apiKey: 'shared-key', model: 'model-x', engineEnabled: true, tonePrompt: 'world-next'
   }));
+  sandbox.WORLD_ENGINE_STORE.saveApiPreset('memory-fast', {
+    apiUrl: 'memory-url-2', apiKey: 'memory-key-2', model: 'model-y', temperature: 0.2
+  }, 'memory');
   sandbox.WORLD_ENGINE_STORE.setItem('memory_engine_settings', JSON.stringify({
-    apiUrl: 'shared-url-2', apiKey: 'shared-key-2', model: 'model-y', engineEnabled: false, tonePrompt: 'memory-next'
+    ...sandbox.WORLD_ENGINE_STORE.settingsFor('memory'), engineEnabled: false, tonePrompt: 'memory-next'
   }));
 
   const world = JSON.parse(sandbox.WORLD_ENGINE_STORE.getItem('world_engine_settings'));
   const memory = JSON.parse(sandbox.WORLD_ENGINE_STORE.getItem('memory_engine_settings'));
-  assert.strictEqual(world.apiUrl, 'shared-url-2');
-  assert.strictEqual(memory.apiUrl, 'shared-url-2');
-  assert.strictEqual(world.apiKey, 'shared-key-2');
+  assert.strictEqual(world.apiPreset, 'default');
+  assert.strictEqual(memory.apiPreset, 'memory-fast');
+  assert.strictEqual(world.apiUrl, 'shared-url');
+  assert.strictEqual(memory.apiUrl, 'memory-url-2');
+  assert.strictEqual(world.apiKey, 'shared-key');
+  assert.strictEqual(memory.apiKey, 'memory-key-2');
   assert.strictEqual(world.engineEnabled, true);
   assert.strictEqual(memory.engineEnabled, false);
   assert.strictEqual(world.tonePrompt, 'world-next');
   assert.strictEqual(memory.tonePrompt, 'memory-next');
-  assert.strictEqual(sandbox.WORLD_ENGINE_STORE.settingsFor('world').apiUrl, 'shared-url-2');
+  assert.strictEqual(sandbox.WORLD_ENGINE_STORE.settingsFor('world').apiUrl, 'shared-url');
+  assert.strictEqual(sandbox.WORLD_ENGINE_STORE.getApiPresets()['memory-fast'].model, 'model-y');
+  sandbox.WORLD_ENGINE_STORE.selectApiPreset('world', 'memory-fast');
+  assert.strictEqual(sandbox.WORLD_ENGINE_STORE.settingsFor('world').apiUrl, 'memory-url-2');
+  assert.strictEqual(sandbox.WORLD_ENGINE_STORE.deleteApiPreset('memory-fast'), true);
+  assert.strictEqual(sandbox.WORLD_ENGINE_STORE.settingsFor('world').apiPreset, 'default');
+  assert.strictEqual(sandbox.WORLD_ENGINE_STORE.settingsFor('memory').apiPreset, 'default');
   assert.strictEqual(config.world.apiKey, undefined);
   assert.ok(saved.length >= 2);
   console.log('settings storage tests passed');

@@ -274,6 +274,33 @@ window.WORLD_ENGINE_UI = (function() {
     return h(core.renderUserName(text));
   }
 
+  function apiPresetInfo(scope, settings) {
+    const store = window.WORLD_ENGINE_STORE;
+    const presets = store?.getApiPresets?.() || { default: {} };
+    const selected = String(settings?.apiPreset || 'default');
+    if (!presets[selected]) presets[selected] = {};
+    const options = Object.keys(presets).map(name =>
+      `<option value="${h(name)}" ${name === selected ? 'selected' : ''}>${h(name)}</option>`
+    ).join('');
+    return { scope, presets, selected, options };
+  }
+
+  function renderApiPresetControls(scope, settings) {
+    const info = apiPresetInfo(scope, settings);
+    return `<div class="we-input-group" style="border:1px solid var(--we-border,#3a3a3a);border-radius:4px;padding:8px;">
+      <label>API 预设（${scope === 'memory' ? '记忆' : '世界'}引擎独立选择）</label>
+      <div style="display:flex;gap:6px;align-items:center;">
+        <select id="we-api-preset" style="flex:1;min-width:0;">${info.options}</select>
+        <button class="we-btn" id="we-api-preset-delete" type="button">删除</button>
+      </div>
+      <div style="display:flex;gap:6px;margin-top:6px;">
+        <input type="text" id="we-api-preset-name" value="${h(info.selected)}" placeholder="预设名称" style="flex:1;min-width:0;">
+        <button class="we-btn" id="we-api-preset-save" type="button">保存预设</button>
+      </div>
+      <div style="font-size:11px;color:var(--we-text3);margin-top:4px;">预设保存在酒馆扩展配置中。两个引擎可选择同一预设，也可分别使用不同地址、Key 和模型。</div>
+    </div>`;
+  }
+
   function showToast(msg, isError, duration) {
     const id = 'we-toast';
     let el = document.getElementById(id);
@@ -1171,6 +1198,7 @@ window.WORLD_ENGINE_UI = (function() {
     const apiTimeoutSec = Math.max(0, Math.round((Number(settings.apiTimeoutMs) || 120000) / 1000));
 
     const apiBody = `
+      ${renderApiPresetControls('memory', settings)}
       <div class="we-input-group">
         <label>连接方式</label>
         <select id="we-connection-mode" style="width:100%;">
@@ -3458,6 +3486,7 @@ window.WORLD_ENGINE_UI = (function() {
       sectionBody(id, body) + '</div>';
 
     const apiBody = `
+      ${renderApiPresetControls('world', settings)}
       <div class="we-input-group">
         <label>连接方式</label>
         <select id="we-connection-mode" style="width:100%;">
@@ -3918,7 +3947,91 @@ window.WORLD_ENGINE_UI = (function() {
     };
   }
 
+  function readApiPresetForm(scope) {
+    const value = id => document.getElementById(id)?.value;
+    const temperature = parseFloat(value('we-temperature'));
+    const timeoutSeconds = parseFloat(value('we-api-timeout-sec'));
+    const retryId = scope === 'memory' ? 'we-memory-api-auto-retries' : 'we-api-auto-retries';
+    return {
+      apiUrl: value('we-api-url') || '',
+      apiKey: value('we-api-key') || '',
+      model: value('we-model') || 'gpt-3.5-turbo',
+      connectionMode: value('we-connection-mode') === 'proxy' ? 'proxy' : 'direct',
+      temperature: Number.isFinite(temperature) ? Math.max(0, temperature) : (scope === 'memory' ? 0.2 : 0.7),
+      maxTokens: Math.max(1, parseInt(value('we-max-tokens')) || 65000),
+      apiTimeoutMs: Number.isFinite(timeoutSeconds) ? Math.max(0, Math.round(timeoutSeconds * 1000)) : 120000,
+      apiAutoRetries: Math.max(0, parseInt(value(retryId)) || 0)
+    };
+  }
+
+  function fillApiPresetForm(scope, settings) {
+    const set = (id, value) => { const element = document.getElementById(id); if (element) element.value = String(value ?? ''); };
+    set('we-api-url', settings.apiUrl || '');
+    set('we-api-key', settings.apiKey || '');
+    set('we-model', settings.model || 'gpt-3.5-turbo');
+    set('we-connection-mode', settings.connectionMode === 'proxy' ? 'proxy' : 'direct');
+    set('we-temperature', Number.isFinite(Number(settings.temperature)) ? Number(settings.temperature) : (scope === 'memory' ? 0.2 : 0.7));
+    set('we-max-tokens', Math.max(1, parseInt(settings.maxTokens) || 65000));
+    set('we-api-timeout-sec', Math.max(0, Math.round((Number(settings.apiTimeoutMs) || 120000) / 1000)));
+    set(scope === 'memory' ? 'we-memory-api-auto-retries' : 'we-api-auto-retries', Math.max(0, parseInt(settings.apiAutoRetries) || 0));
+    const modelList = document.getElementById('we-model-list');
+    if (modelList) modelList.style.display = 'none';
+  }
+
+  function refreshApiPresetSelect(scope, selected) {
+    const select = document.getElementById('we-api-preset');
+    if (!select) return;
+    const presets = window.WORLD_ENGINE_STORE?.getApiPresets?.() || { default: {} };
+    select.innerHTML = Object.keys(presets).map(name => `<option value="${h(name)}">${h(name)}</option>`).join('');
+    select.value = presets[selected] ? selected : (presets.default ? 'default' : Object.keys(presets)[0]);
+    const nameInput = document.getElementById('we-api-preset-name');
+    if (nameInput) nameInput.value = select.value || '';
+  }
+
+  function refreshApiSettingsCaches(scope) {
+    if (scope === 'memory') window.MEMORY_ENGINE_SETTINGS?.getSettings?.(true);
+    window.WORLD_ENGINE_API?.getSettings?.(true);
+  }
+
+  function bindApiPresetControls() {
+    const select = document.getElementById('we-api-preset');
+    if (!select) return;
+    const scope = _engineFace === 'memory' ? 'memory' : 'world';
+    const store = window.WORLD_ENGINE_STORE;
+    select.onchange = () => {
+      const settings = store?.selectApiPreset?.(scope, select.value) || store?.settingsFor?.(scope) || {};
+      refreshApiSettingsCaches(scope);
+      fillApiPresetForm(scope, settings);
+      const nameInput = document.getElementById('we-api-preset-name');
+      if (nameInput) nameInput.value = select.value;
+      showToast(`${scope === 'memory' ? '记忆' : '世界'}引擎已选择 API 预设“${select.value}”`);
+    };
+    const saveButton = document.getElementById('we-api-preset-save');
+    if (saveButton) saveButton.onclick = () => {
+      const name = String(document.getElementById('we-api-preset-name')?.value || '').trim();
+      if (!name) { showToast('API 预设名称不能为空', true); return; }
+      try {
+        store?.saveApiPreset?.(name, readApiPresetForm(scope), scope);
+        refreshApiSettingsCaches(scope);
+        refreshApiPresetSelect(scope, name);
+        showToast(`API 预设“${name}”已保存并用于${scope === 'memory' ? '记忆' : '世界'}引擎`);
+      } catch (error) { showToast(error?.message || String(error), true); }
+    };
+    const deleteButton = document.getElementById('we-api-preset-delete');
+    if (deleteButton) deleteButton.onclick = () => {
+      const name = select.value;
+      if (!confirm(`删除 API 预设“${name}”？`)) return;
+      if (!store?.deleteApiPreset?.(name)) { showToast('至少需要保留一个 API 预设', true); return; }
+      const settings = store.settingsFor?.(scope) || {};
+      refreshApiSettingsCaches(scope);
+      refreshApiPresetSelect(scope, settings.apiPreset);
+      fillApiPresetForm(scope, settings);
+      showToast(`API 预设“${name}”已删除`);
+    };
+  }
+
   function bindEvents(state) {
+    bindApiPresetControls();
     const themeSelect = document.getElementById('we-theme-select');
     if (themeSelect) themeSelect.onchange = () => setTheme(themeSelect.value);
     const memoryThemeSelect = document.getElementById('we-memory-theme-select');
