@@ -253,10 +253,13 @@ window.MEMORY_ENGINE = (function() {
 
   function parseResponse(raw, tasks) {
     const text = clean(raw).replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '');
-    // 兼容旧 Prompt 或不服从格式的模型：JSON 字符串在输出上限处被截断时，
-    // 只提取 big_summary 已生成的正文，不把残缺 JSON 外壳存入总述。
-    if (tasks.big && !tasks.memory && !tasks.small) {
-      const field = /["']big_summary["']\s*:\s*"/i.exec(text);
+    const singleSummaryField = tasks.big && !tasks.memory && !tasks.small
+      ? 'big_summary'
+      : (tasks.small && !tasks.memory && !tasks.big ? 'small_summary' : '');
+    // 兼容不服从格式的模型：单独摘要任务的 JSON 字符串即使在输出上限处截断，
+    // 也提取已经生成的正文，不把残缺 JSON 外壳存入记录。
+    if (singleSummaryField) {
+      const field = new RegExp(`["']${singleSummaryField}["']\\s*:\\s*"`, 'i').exec(text);
       if (field) {
         const start = field.index + field[0].length;
         let extracted = '', escaped = false;
@@ -277,8 +280,8 @@ window.MEMORY_ENGINE = (function() {
           return {
             personal: [],
             entities: Object.fromEntries(ENTITY_TYPES.map(type => [type, []])),
-            smallSummary: '',
-            bigSummary: clean(extracted)
+            smallSummary: singleSummaryField === 'small_summary' ? clean(extracted) : '',
+            bigSummary: singleSummaryField === 'big_summary' ? clean(extracted) : ''
           };
         }
       }
@@ -298,20 +301,21 @@ window.MEMORY_ENGINE = (function() {
       if (arrayStart >= 0 && arrayStart < objectStart && arrayEnd > arrayStart) value = JSON.parse(text.slice(arrayStart, arrayEnd + 1));
       else if (objectStart >= 0 && objectEnd > objectStart) value = JSON.parse(text.slice(objectStart, objectEnd + 1));
       else if (arrayStart >= 0 && arrayEnd > arrayStart) value = JSON.parse(text.slice(arrayStart, arrayEnd + 1));
-      else if (tasks.big && text) {
-        // 部分兼容模型会严格完成总述正文，却忽略最外层 JSON 包装。
-        // 总述只有一个字符串字段，此时接受纯正文，避免因包装格式失败丢弃整批结果。
+      else if (singleSummaryField && text) {
+        // 单独摘要任务只有一个字符串字段，此时接受纯正文，避免因包装格式失败丢弃整批结果。
         const plain = text
           .replace(/^big_summary\s*[:：]\s*/i, '')
+          .replace(/^small_summary\s*[:：]\s*/i, '')
           .replace(/^总述\s*[:：]\s*/i, '')
+          .replace(/^纪要\s*[:：]\s*/i, '')
           .replace(/^正文\s*[:：]\s*/i, '')
           .trim();
-        if (plain) value = { big_summary: plain };
+        if (plain) value = { [singleSummaryField]: plain };
         else throw new Error('API 返回中没有合法 JSON 对象或数组');
       }
       else throw new Error('API 返回中没有合法 JSON 对象或数组');
       } catch (error) {
-        if (tasks.big && text) value = { big_summary: text };
+        if (singleSummaryField && text) value = { [singleSummaryField]: text };
         else throw error;
       }
     }
@@ -867,7 +871,8 @@ window.MEMORY_ENGINE = (function() {
     const st = settings(), state = options?.baseState ? clone(options.baseState) : data().loadState();
     const prompt = await buildRequestPrompt(tasks, state, st);
     lastDebug = { prompt, requestPrompt: prompt, rawResult: '', apiResponse: '', parsed: null, error: '' };
-    const retries = Math.max(0, Number(options?.retries ?? st.apiAutoRetries) || 0);
+    const configuredRetries = Number(options?.retries ?? st.apiAutoRetries) || 0;
+    const retries = Math.max(0, tasks.small && !tasks.memory ? Math.max(1, configuredRetries) : configuredRetries);
     let faultAttempt = 0, truncationRetried = false;
     while (true) {
       try {
@@ -877,6 +882,9 @@ window.MEMORY_ENGINE = (function() {
         const bigBounds = tasks.big
           ? window.MEMORY_ENGINE_BIG_SUMMARY_PROMPT?.lengthBounds?.(tasks.big.summaries || [])
           : null;
+        const smallBounds = tasks.small && !tasks.memory
+          ? Math.max(200, Math.min(1200, Math.ceil(clean(tasks.small.conversation).length / 2) + 256))
+          : null;
         // 推理模型会把内部推理也计入 max_tokens。768 很容易在正文刚开始时耗尽，
         // 因此保留 4096 的基础预算；长总述再按目标正文长度温和扩展。
         const summaryTarget = Math.ceil(bigBounds?.maxLength * 2.5) + 256;
@@ -884,7 +892,7 @@ window.MEMORY_ENGINE = (function() {
           ? Math.min(configuredMaxTokens, configuredMaxTokens > 4096
             ? Math.max(4096, summaryTarget + 1024)
             : Math.max(768, summaryTarget))
-          : configuredMaxTokens;
+          : (smallBounds ? Math.min(configuredMaxTokens, smallBounds) : configuredMaxTokens);
         if (truncationRetried) {
           requestMaxTokens = Math.min(configuredMaxTokens, Math.max(requestMaxTokens * 2, requestMaxTokens + 2048));
         }
@@ -939,6 +947,9 @@ window.MEMORY_ENGINE = (function() {
     try {
       const before = options?.baseState ? clone(options.baseState) : data().loadState();
       const extracted = await requestTasks(tasks, { ...options, baseState: before });
+      if (tasks.small && !tasks.memory && !clean(extracted.smallSummary)) {
+        throw new Error('API 没有返回有效纪要');
+      }
       if (options?.saveCheckpoint !== false) data().saveCheckpoint(before);
       let next = clone(before);
       const memorySourceDigest = tasks.memory && Array.isArray(tasks.memory.sourceRefs) && tasks.memory.sourceRefs.length
@@ -1132,13 +1143,19 @@ window.MEMORY_ENGINE = (function() {
     const after = data().loadState();
     const bigTask = buildBigTask(after, false, bigThresholdOverride);
     if (!bigTask) return primary;
-    const bigResult = await runTasks({ big: bigTask }, {
-      ...options,
-      baseState: after,
-      saveCheckpoint: false,
-      // 世界摘要纪要只在 primary 落库一次；这里仅消费待整理纪要生成总述。
-      worldDigestMinute: null
-    });
+    let bigResult;
+    try {
+      bigResult = await runTasks({ big: bigTask }, {
+        ...options,
+        baseState: after,
+        saveCheckpoint: false,
+        // 世界摘要纪要只在 primary 落库一次；这里仅消费待整理纪要生成总述。
+        worldDigestMinute: null
+      });
+    } catch (error) {
+      console.warn('[记忆引擎] 总述生成失败，已保留纪要待下次重试', error);
+      return { ...primary, bigError: String(error?.message || error), state: data().loadState() };
+    }
     return {
       ...primary,
       added: Number(primary.added || 0) + Number(bigResult?.updatedBig || 0),
@@ -2238,7 +2255,7 @@ window.MEMORY_ENGINE = (function() {
       ...original,
       event_memory: { small_summaries: [], big_summaries: [], small_summary_layer: null, big_summary_cursor: 0 }
     });
-    let failedBatches = 0, hasSummaryGap = false;
+    let failedBatches = 0;
     try {
       for (let i = 0; i < batches.length && backfillRunning; i++) {
         const layers = batches[i], firstAi = layers[0], finish = layers.at(-1);
@@ -2252,24 +2269,36 @@ window.MEMORY_ENGINE = (function() {
         const state = data().loadState();
         setSummaryBackfillStatus(i, batches.length, `正在重填纪要与总述 ${i + 1} / ${batches.length}`);
         try {
-          const options = {
+          await runTasks({ small: smallTask }, {
             baseState: state, retries: st.backfillRetries, saveCheckpoint: true, allowWhileBackfill: true
-          };
-          if (hasSummaryGap) await runTasks({ small: smallTask }, options);
-          else await runTasksThenDueBig({ small: smallTask }, options, st.summaryBackfillBigEveryX);
+          });
         } catch (error) {
           if (!backfillRunning) break;
           failedBatches++;
-          const digest = timelineApi()?.digestRefs?.(smallTask.sourceRefs || []) || '';
-          const stored = digest && ensureEventState(data().loadState()).small_summaries.some(item =>
-            item.status === 'valid' && clean(item.sourceDigest) === digest
-          );
-          if (!stored) hasSummaryGap = true;
           console.warn(`[记忆引擎] 纪要重填批次 ${i + 1} 跳过`, error);
         }
       }
+      let failedBigSummaries = 0;
+      while (backfillRunning) {
+        const state = data().loadState();
+        const task = buildBigTask(state, false, st.summaryBackfillBigEveryX);
+        if (!task) break;
+        try {
+          await runTasks({ big: task }, {
+            baseState: state, retries: st.backfillRetries,
+            saveCheckpoint: false, allowWhileBackfill: true
+          });
+        } catch (error) {
+          if (!backfillRunning) break;
+          failedBigSummaries++;
+          console.warn(`[记忆引擎] 总述归档跳过，保留待重试纪要 ${task.startLayer}-${task.endLayer}`, error);
+          break;
+        }
+      }
       setSummaryBackfillStatus(batches.length, batches.length, backfillRunning
-        ? (failedBatches ? `纪要重填完成，跳过 ${failedBatches} 批（可用自动修复重试）` : '纪要与总述重填完成')
+        ? ((failedBatches || failedBigSummaries)
+          ? `纪要重填完成，跳过纪要 ${failedBatches} 批、总述 ${failedBigSummaries} 次（可继续重试）`
+          : '纪要与总述重填完成')
         : '纪要与总述重填已停止');
     } catch (error) {
       setSummaryBackfillStatus(summaryBackfillStatus.current, batches.length, `纪要与总述重填失败：${error?.message || error}`);

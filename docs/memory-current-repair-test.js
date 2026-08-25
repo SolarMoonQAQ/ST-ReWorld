@@ -146,7 +146,7 @@ for (const filename of [
 
   sandbox.MEMORY_ENGINE_DATA.saveState(sandbox.MEMORY_ENGINE_DATA.defaultState());
   failText = '第二批故障';
-  failuresLeft = 1;
+  failuresLeft = 2;
   await sandbox.MEMORY_ENGINE.backfillSummaries();
   state = sandbox.MEMORY_ENGINE_DATA.loadState();
   let summaryEnds = state.event_memory.small_summaries.map(item => item.endLayer);
@@ -163,7 +163,7 @@ for (const filename of [
 
   sandbox.MEMORY_ENGINE_DATA.saveState(sandbox.MEMORY_ENGINE_DATA.defaultState());
   failText = '第二批故障';
-  failuresLeft = 1;
+  failuresLeft = 2;
   const skipped = await sandbox.MEMORY_ENGINE.repairCurrentHistory();
   state = sandbox.MEMORY_ENGINE_DATA.loadState();
   memoryEnds = state.timeline.nodes.filter(node => node.kind === 'memory').map(node => node.endLayer);

@@ -223,6 +223,16 @@ for (const filename of [
     '西营将领李定国在黑石峡全歼敌军，缴获战马二百八十',
     '总述 JSON 在字符串中途截断时必须提取正文，不得保存 JSON 外壳'
   );
+  assert.strictEqual(
+    sandbox.MEMORY_ENGINE._test.parseResponse('{"small_summary":"第十七楼完成设伏并缴获战马', { small: {} }).smallSummary,
+    '第十七楼完成设伏并缴获战马',
+    '纪要 JSON 在字符串中途截断时必须提取正文'
+  );
+  assert.strictEqual(
+    sandbox.MEMORY_ENGINE._test.parseResponse('第十七楼完成设伏并缴获战马。', { small: {} }).smallSummary,
+    '第十七楼完成设伏并缴获战马。',
+    '纪要接口返回纯正文时也必须接受'
+  );
 }
 
 {
