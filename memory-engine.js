@@ -2132,14 +2132,21 @@ window.MEMORY_ENGINE = (function() {
     if (element) element.textContent = summaryBackfillStatus.message;
   }
 
+  function aiLayersForBackfill(all, st, configuredEnd) {
+    const opening = ignoreFirstLayer(st);
+    const layers = (all || []).map((message, index) => (
+      message && !message.is_user && !(opening && index === 0) ? index : -1
+    )).filter(index => index >= 0);
+    const limit = Math.max(0, parseInt(configuredEnd) || 0);
+    return limit > 0 ? layers.slice(0, limit) : layers;
+  }
+
   async function backfill() {
     if (backfillRunning || running) return;
     const st = settings(), all = chat();
     if (st.engineEnabled === false) throw new Error('记忆引擎已关闭');
     const configuredEnd = Math.max(0, parseInt(st.backfillEndLayer) || 0);
-    const end = Math.min(all.length - 1, configuredEnd || all.length - 1);
-    const opening = ignoreFirstLayer(st);
-    const aiLayers = all.map((message, index) => (!message?.is_user && index <= end && !(opening && index === 0) ? index : -1)).filter(i => i >= 0);
+    const aiLayers = aiLayersForBackfill(all, st, configuredEnd);
     const size = Math.max(1, parseInt(st.backfillBatchSize) || 5), batches = [];
     for (let i = 0; i < aiLayers.length; i += size) batches.push(aiLayers.slice(i, i + size));
     if (!batches.length) { setBackfillStatus(0, 0, '没有可重填的 AI 楼层'); return; }
@@ -2180,9 +2187,7 @@ window.MEMORY_ENGINE = (function() {
     const st = settings(), all = chat();
     if (st.engineEnabled === false) throw new Error('记忆引擎已关闭');
     const configuredEnd = Math.max(0, parseInt(st.backfillEndLayer) || 0);
-    const end = Math.min(all.length - 1, configuredEnd || all.length - 1);
-    const opening = ignoreFirstLayer(st);
-    const aiLayers = all.map((message, index) => (!message?.is_user && index <= end && !(opening && index === 0) ? index : -1)).filter(index => index >= 0);
+    const aiLayers = aiLayersForBackfill(all, st, configuredEnd);
     const size = Math.max(1, parseInt(st.summaryBackfillSmallEveryX) || 5), batches = [];
     for (let i = 0; i < aiLayers.length; i += size) batches.push(aiLayers.slice(i, i + size));
     if (!batches.length) { setSummaryBackfillStatus(0, 0, '没有可重填的 AI 楼层'); return; }
@@ -2389,7 +2394,6 @@ window.MEMORY_ENGINE = (function() {
           pending = [];
         }
       }
-
       state = refreshBigSummaryCursor(data().loadState());
       data().saveState(state);
       const message = backfillRunning
@@ -2497,7 +2501,8 @@ window.MEMORY_ENGINE = (function() {
     _test: {
       exponentialMemorySample, rollbackLinkedLayer, removeLinkedLayerFromState, rewindSummaryCursorForDeletedLayers,
       buildSmallHistoryContext, buildTaskReferenceContext, previousRawReference,
-      parseResponse, selectHiddenMessageIds, recentRawRoundMessageIds, buildBigTask, requestTasks
+      parseResponse, selectHiddenMessageIds, recentRawRoundMessageIds, buildBigTask, requestTasks,
+      aiLayersForBackfill
     }
   };
 })();

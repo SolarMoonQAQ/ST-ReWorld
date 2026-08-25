@@ -1372,7 +1372,7 @@ window.WORLD_ENGINE_UI = (function() {
       <div style="display:flex;gap:6px;flex-wrap:wrap;">
         <div class="we-input-group" style="flex:1;min-width:90px;margin-bottom:0;"><label>人物实体每批楼层</label>
           <input type="number" id="we-memory-backfill-batch" min="1" step="1" value="${backfillBatch}"></div>
-        <div class="we-input-group" style="flex:1;min-width:90px;margin-bottom:0;"><label>结束楼层（0=全部）</label>
+        <div class="we-input-group" style="flex:1;min-width:90px;margin-bottom:0;"><label>结束 AI 楼层序号（0=全部）</label>
           <input type="number" id="we-memory-backfill-end" min="0" step="1" value="${backfillEnd}"></div>
         <div class="we-input-group" style="flex:1;min-width:90px;margin-bottom:0;"><label>每批 fault 重试次数</label>
           <input type="number" id="we-memory-backfill-retries" min="0" step="1" value="${backfillRetries}"></div>

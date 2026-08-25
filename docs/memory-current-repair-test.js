@@ -77,6 +77,18 @@ for (const filename of [
   'memory-engine.js'
 ]) vm.runInNewContext(fs.readFileSync(path.join(root, filename), 'utf8'), sandbox, { filename });
 
+{
+  const longChat = Array.from({ length: 41 }, (_, index) => ({
+    is_user: index % 2 === 1,
+    mes: `消息${index}`
+  }));
+  const selected = sandbox.MEMORY_ENGINE._test.aiLayersForBackfill(
+    longChat, { firstLayerIsAiOpening: true }, 20
+  );
+  assert.strictEqual(selected.length, 20, '结束值应按第 N 个 AI 楼层计算，而不是物理消息下标');
+  assert.strictEqual(selected.at(-1), 40, '第20个 AI 楼层应定位到当前聊天第40个物理楼层');
+}
+
 (async () => {
   sandbox.MEMORY_ENGINE_DATA.saveState(sandbox.MEMORY_ENGINE_DATA.defaultState());
   const first = await sandbox.MEMORY_ENGINE.repairCurrentHistory();
