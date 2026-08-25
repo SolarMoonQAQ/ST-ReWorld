@@ -78,6 +78,7 @@ window.WORLD_ENGINE_CORE = (function() {
         secretAssets: []
       },
       lastEvolveResult: null,
+      _lastEvolvedMessageKey: '',
       lastInjection: null,
       lastUpdated: {}
     };
@@ -769,6 +770,7 @@ window.WORLD_ENGINE_CORE = (function() {
 
     // 去掉调试/内部字段
     delete s.lastEvolveResult;
+    delete s._lastEvolvedMessageKey;
     delete s.lastInjection;
     delete s.lastUpdated;
     delete s._terminalEventsThisRound;
@@ -788,6 +790,7 @@ window.WORLD_ENGINE_CORE = (function() {
     const clean = JSON.parse(JSON.stringify(importedState));
     // 去掉导入数据里的内部字段
     delete clean.lastEvolveResult;
+    delete clean._lastEvolvedMessageKey;
     delete clean.lastInjection;
     delete clean.lastUpdated;
     delete clean._terminalEventsThisRound;

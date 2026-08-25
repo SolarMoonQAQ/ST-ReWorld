@@ -114,6 +114,16 @@ for (const file of [
   assert.strictEqual(state.event_memory.small_summaries.length, 2, '重 roll 应只替换世界摘要纪要');
   assert.strictEqual(state.event_memory.big_summaries.length, 1, '受影响总述应重算而不是追加');
 
+  version = 'C';
+  await sandbox.MEMORY_ENGINE.ingestWorldEvolution({
+    layer: 20, worldDigest: '世界摘要C', worldUpdate: { world_digest: '世界摘要C' }, replace: false
+  });
+  state = sandbox.MEMORY_ENGINE_DATA.loadState();
+  assert.ok(!JSON.stringify(state).includes('摘要B') && JSON.stringify(state).includes('摘要C'),
+    '即使调用方漏传 replace，同楼层联动也必须按楼层唯一覆盖');
+  assert.strictEqual(state.event_memory.small_summaries.filter(item => item.source === 'world_engine').length, 1,
+    '同楼层只能保留一条世界联动纪要');
+
   const items = Array.from({ length: 5 }, (_, index) => `记忆${index}`); // 旧 → 新
   const newest = sandbox.MEMORY_ENGINE._test.exponentialMemorySample(items, 1, () => 0.5, 10000);
   assert.deepStrictEqual(Array.from(newest), ['记忆4'], '相同骰值下，指数权重必须优先选择最新记忆');

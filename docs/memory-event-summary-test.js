@@ -7,6 +7,7 @@ const vm = require('vm');
 const root = path.resolve(__dirname, '..');
 const storeMap = new Map();
 const calls = [];
+const callOptions = [];
 const listeners = new Map();
 const runningLabels = [];
 const startSignals = [];
@@ -85,8 +86,9 @@ const sandbox = {
   },
   MEMORY_ENGINE_SETTINGS: { getSettings() { return { ...settings }; } },
   WORLD_ENGINE_API: {
-    async callApi(prompt) {
+    async callApi(prompt, maxTokens) {
       calls.push(prompt);
+      callOptions.push({ prompt, maxTokens });
       const result = {};
       if (prompt.includes('"personal_memory": []')) {
         result.personal_memory = [{ name: ['角色'], known_by: [], memory: '角色得知北方发生叛乱。', time: '' }];
@@ -193,6 +195,11 @@ for (const filename of [
     summaries: [{ content: '甲'.repeat(600) }, { content: '乙'.repeat(600) }]
   });
   assert.ok(lengthPrompt.includes('不超过 600 字'), '总述 Prompt 必须写入计算后的具体上限');
+  const shortLengthPrompt = sandbox.MEMORY_ENGINE_BIG_SUMMARY_PROMPT.buildUserPrompt({
+    summaries: [{ content: '短纪要'.repeat(10) }]
+  });
+  assert.ok(shortLengthPrompt.includes('不少于 80 字、不超过 120 字'),
+    '短纪要总述必须采用动态短篇幅，不能强迫模型凑满 500 字');
   assert.ok(!lengthPrompt.includes('本批纪要正文合计'), '总述 Prompt 不应暴露纪要合计字数');
   assert.strictEqual(
     sandbox.MEMORY_ENGINE._test.parseResponse(JSON.stringify({ small_summary: longSmall }), { small: {} }).smallSummary,
@@ -379,6 +386,17 @@ for (const filename of [
   assert.ok(calls[0].includes('世界进程的总述编纂者'));
   assert.ok(!calls[0].includes('世界进程的纪要记录员'), '手动大总结只应携带大总结 Prompt');
   assert.ok(!calls[0].includes('"personal_memory": []'));
+  assert.ok(callOptions.at(-1).maxTokens < settings.maxTokens,
+    '总述请求应按目标篇幅收紧 max_tokens，不能沿用全局超大输出上限');
+
+  const pendingState = sandbox.MEMORY_ENGINE_DATA.defaultState();
+  pendingState.event_memory.small_summaries = Array.from({ length: 7 }, (_, index) => ({
+    id: `pending_${index + 1}`, startLayer: index * 2 + 1, endLayer: index * 2 + 2,
+    content: `待整理纪要${index + 1}`, status: 'valid'
+  }));
+  const pendingTask = sandbox.MEMORY_ENGINE._test.buildBigTask(pendingState, true, 3);
+  assert.strictEqual(pendingTask.summaries.length, 3,
+    '手动总述也必须按批次读取积压纪要，不能一次塞入全部历史');
 
   const legacy = sandbox.MEMORY_ENGINE_DATA.defaultState();
   delete legacy.event_memory.big_summaries;

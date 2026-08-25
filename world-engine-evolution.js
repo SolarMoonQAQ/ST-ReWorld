@@ -1061,6 +1061,8 @@ ${JSON.stringify(sample || [], null, 2)}
     delete state._terminalEventsThisRound;
     const hadStoredState = core.hasState();
     const backup = JSON.parse(JSON.stringify(state));
+    const replacementRound = Math.max(0, Number(backup.round) || 0);
+    let restoredAutomaticBase = false;
     // 基底由调用方显式指定（手动双按钮）：
     //   'forward' = 向前推演，从当前状态推、推完存档点前移（等同新轮次）；
     //   'redo'    = 重新推演，从存档点恢复再推、轮次不变；
@@ -1102,11 +1104,23 @@ ${JSON.stringify(sample || [], null, 2)}
         return false;
       }
     } else {
-      // 自动重 roll（mode=undefined 且非新轮次）：对同一楼正文重新生成触发的重推。
-      //   不从存档点恢复基底（存档点是「这层正文产生前」的状态，留作注入用，推演基底用当前 state）；
-      //   轮次保持当前轮（forward 已 round++ 到当前轮，这里不动）；不动存档点/指纹。
-      //   无存档点时（首层场景）也不报错——直接在当前 state 上推，首层本就无 cp。
-      console.log('[世界引擎] 🔄 当前轮重新推演（自动重 roll，轮次不变）');
+      // 自动重 roll / 同楼层截断续写必须“替换本楼结果”，因此从该楼产生前的存档点重算。
+      // 旧实现直接在已经包含本楼结果的当前 state 上再次推进，会重复累计事件、风声和纪要。
+      const cp = core.restoreCheckpoint();
+      if (cp) {
+        Object.assign(state, cp);
+        state.memories = cp.memories || [];
+        state.events = cp.events || [];
+        state.factions = cp.factions || [];
+        state.worldTrends = cp.worldTrends || [];
+        state.winds = cp.winds || [];
+        state.enemies = cp.enemies || [];
+        state.influenceChain = cp.influenceChain || [];
+        restoredAutomaticBase = true;
+        console.log('[世界引擎] 🔄 同楼层重新推演：已恢复本楼前存档点');
+      } else {
+        console.warn('[世界引擎] ⚠️ 同楼层重新推演缺少存档点，暂从当前状态重算');
+      }
     }
 
     _isRunning = true;
@@ -1313,12 +1327,14 @@ ${JSON.stringify(sample || [], null, 2)}
       //   旧代码无差别在 isNew=false 时打印「重roll/redo 轮次不变」，但上方基底选择已把自动重 roll
       //   错误 Object.assign(cp) 回存档点（症状B），现基底已纠正为不回存档点，此处轮次保持当前轮。
       if (isForward) {
-        // 首次推演不创建空白存档点；后续旧当前状态成为存档点并保留原层数。
+        // 每个已推进楼层都保存“本楼产生前”的完整基底，包括首次推演；
+        // 这样重 roll、截断续写和重新推进才能真正替换本楼，而不是在结果上继续累加。
         state.round++;                             // 只在 forward 涨轮次
-        if (hadStoredState) core.saveCheckpoint(backup);
+        core.saveCheckpoint(backup);
         core.saveFingerprint(core.getChatFingerprint());
         console.log('[世界引擎] ✅ 推演完成，新轮次第', state.round, '轮，存档点已推进');
       } else {
+        if (restoredAutomaticBase) state.round = replacementRound;
         const label = (mode === 'redo') ? 'redo' : '自动重roll';
         console.log('[世界引擎] ✅ 推演完成（' + label + '），轮次不变：第', state.round, '轮');
       }

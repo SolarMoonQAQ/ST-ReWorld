@@ -377,7 +377,14 @@
       function getMessageKey(ctx, chat, message) {
         const messageId = message?.mesId ?? message?.message_id ?? message?.send_date ?? (chat.length - 1);
         const swipeId = message?.swipe_id ?? message?.swipeId ?? '';
-        return [core.getChatId(), chat.length - 1, messageId, swipeId].join('|');
+        // 楼层和 swipeId 在截断续写/部分插件场景下可能保持不变；把正文摘要纳入身份，
+        // 让同一楼层的内容替换能重新推演，同时完全相同的重复事件保持幂等。
+        let hash = 2166136261;
+        for (const char of String(message?.mes || '')) {
+          hash ^= char.charCodeAt(0);
+          hash = Math.imul(hash, 16777619) >>> 0;
+        }
+        return [core.getChatId(), chat.length - 1, messageId, swipeId, hash.toString(16)].join('|');
       }
 
       function clearAutoEvolveTimer() {
@@ -418,6 +425,11 @@
 
         const currentKey = getMessageKey(ctx, chat, lastMsg);
         if (currentKey !== expectedKey) return;
+        const storedState = core.hasState() ? core.loadState() : null;
+        if (storedState?._lastEvolvedMessageKey === currentKey) {
+          lastProcessedMessageKey = currentKey;
+          return;
+        }
         if (aiMsg !== expectedText) {
           onMessageReceived();
           return;
@@ -500,7 +512,7 @@
           }
         }
 
-        const ok = await performEvolution(aiMsg, chat, timeStoryDay, timeReadRounds);
+        const ok = await performEvolution(aiMsg, chat, timeStoryDay, timeReadRounds, { messageKey: currentKey });
         if (ok) lastProcessedMessageKey = currentKey;
       }
 
@@ -557,6 +569,7 @@
           if (opts.mode) evolveOpts.mode = opts.mode;
           const success = await evolution.evolve(state, opts.userMsg || '', aiMsg, evolveOpts);
           if (success) {
+            if (opts.messageKey) state._lastEvolvedMessageKey = opts.messageKey;
             ledger.recordChanges(state);
             if (storyDay != null) { state.time = Number(storyDay); core.saveState(state); }
             // 世界 API 已经完成：先落库、更新注入并刷新世界界面，再开始记忆联动。
@@ -611,6 +624,12 @@
         const aiMsg = !lastMsg?.is_user ? (lastMsg?.mes || '').trim() : '';
         const settings = api.getSettings(true);
         const state = core.loadState();
+        if (mode === 'forward' && !lastMsg?.is_user
+          && Number.isFinite(Number(state.chatLayer))
+          && core.getChatLayer() <= Number(state.chatLayer)) {
+          setStatus('当前 AI 楼层已经推进；请先生成下一楼，或使用「重新推进」替换本楼结果', true);
+          return false;
+        }
         // forward 只按当前状态之后新增的轮数取最近对话；redo 则从存档点重新计算。
         // 两条路径都受 manualReadRounds 限制，buildDialogueText 最终始终取聊天末尾最新 N 轮。
         const dialogueBase = mode === 'redo' ? core.restoreCheckpoint() : state;
@@ -619,6 +638,7 @@
           mode,
           displayScope: scope,
           userMsg,
+          messageKey: !lastMsg?.is_user ? getMessageKey(ctx, chat, lastMsg) : '',
           forceApplyInjection: true
         });
       }

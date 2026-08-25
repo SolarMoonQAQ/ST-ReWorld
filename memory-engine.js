@@ -807,8 +807,17 @@ window.MEMORY_ENGINE = (function() {
     const retries = Math.max(0, Number(options?.retries ?? st.apiAutoRetries) || 0);
     for (let attempt = 0; attempt <= retries; attempt++) {
       try {
+        // 总述已经与人物/实体、纪要拆成独立请求。按本批目标正文长度收紧输出上限，
+        // 避免把全局 65000 token 上限交给只需数百字的总述，部分兼容端会因此极慢或超时。
+        const configuredMaxTokens = Math.max(1, parseInt(st.maxTokens) || 65000);
+        const bigBounds = tasks.big
+          ? window.MEMORY_ENGINE_BIG_SUMMARY_PROMPT?.lengthBounds?.(tasks.big.summaries || [])
+          : null;
+        const requestMaxTokens = bigBounds
+          ? Math.min(configuredMaxTokens, Math.max(768, Math.ceil(bigBounds.maxLength * 2.5) + 256))
+          : configuredMaxTokens;
         const raw = await window.WORLD_ENGINE_API.callApi(
-          prompt, st.maxTokens, st.temperature, abortController?.signal, st
+          prompt, requestMaxTokens, st.temperature, abortController?.signal, st
         );
         lastDebug.rawResult = lastDebug.apiResponse = raw;
         const parsed = parseResponse(raw, tasks);
@@ -859,6 +868,25 @@ window.MEMORY_ENGINE = (function() {
           item.status !== 'stale' && clean(item.sourceDigest) === sourceDigest
         ) : null;
         if (!existingSummary) {
+          // 同一聊天消息的正文可能因重 roll、续写或截断修复而改变，但楼层数字不变。
+          // 以稳定 messageId 绑定纪要并替换旧记录，不能只按 start/endLayer 追加新条目。
+          const sourceKeys = new Set(sourceRefs.map(ref => `${clean(ref?.chatId)}:${clean(ref?.messageId)}`).filter(key => key !== ':'));
+          const replacedIds = new Set();
+          if (sourceKeys.size) {
+            eventMemory.small_summaries = eventMemory.small_summaries.filter(item => {
+              const overlaps = (item.sourceRefs || []).some(ref => sourceKeys.has(`${clean(ref?.chatId)}:${clean(ref?.messageId)}`));
+              if (!overlaps || item.status === 'stale') return true;
+              replacedIds.add(clean(item.id));
+              return false;
+            });
+            if (replacedIds.size) {
+              eventMemory.big_summaries = eventMemory.big_summaries.filter(item =>
+                !(item.childIds || []).some(id => replacedIds.has(clean(id))));
+              eventMemory.big_summary_cursor = Math.max(0, Math.min(
+                eventMemory.small_summaries.length, Number(eventMemory.big_summary_cursor) || 0
+              ));
+            }
+          }
           eventMemory.small_summaries.push({
             id: nextSmallSummaryId(eventMemory),
             startLayer: Number(tasks.small.startLayer) || 0,
@@ -981,7 +1009,9 @@ window.MEMORY_ENGINE = (function() {
     const threshold = Math.max(1, parseInt(thresholdOverride ?? st.bigSummaryEveryX) || 5);
     if (!force && allPending.length < threshold) return null;
     if (force && !allPending.length) return null;
-    const pending = force ? allPending : allPending.slice(0, threshold);
+    // 即使手动点击“立即总述”，也只处理一个配置批次。旧实现 force=true 会把全部积压
+    // 纪要一次塞进请求，聊天越长 prompt 与目标输出越大，最终只有少数长上下文模型能完成。
+    const pending = allPending.slice(0, threshold);
     const childIds = pending.map(item => item.id);
     const sourceRefs = timelineApi()?.unionRefs?.(pending.map(item => item.sourceRefs || [])) || [];
     return {
@@ -1191,9 +1221,17 @@ window.MEMORY_ENGINE = (function() {
   async function manualBigSummary() {
     const st = settings();
     if (st.engineEnabled === false) throw new Error('记忆引擎已关闭');
-    const state = data().loadState(), bigTask = buildBigTask(state, true);
+    let state = data().loadState(), bigTask = buildBigTask(state, true);
     if (!bigTask) throw new Error('当前没有尚未并入总述的纪要');
-    return runTasks({ big: bigTask }, { baseState: state });
+    let result = null;
+    // 手动总述仍整理全部积压，但每次 API 请求只处理一个有限批次。
+    while (bigTask) {
+      result = await runTasks({ big: bigTask }, { baseState: state });
+      if (!result?.updatedBig) break;
+      state = data().loadState();
+      bigTask = buildBigTask(state, true);
+    }
+    return result;
   }
 
   function newHistoryAuditReport() {
@@ -1789,15 +1827,17 @@ window.MEMORY_ENGINE = (function() {
     const deadline = Date.now() + Math.max(10000, Number(st.apiTimeoutMs) || 120000);
     while (running && Date.now() < deadline) await delay(100);
     if (running) throw new Error('等待当前记忆任务结束超时');
-    if (payload?.replace === true) rollbackLinkedLayer(layer);
-
+    // 世界联动按“聊天 + 楼层”唯一绑定。同楼层再次推进（包括重 roll、截断续写）
+    // 先撤销上一笔联动，再以本次返回整体替换，禁止纪要/总述在同楼层叠加。
     const digest = clean(payload?.worldDigest);
     if (!digest) return { skipped: true, reason: 'empty_digest' };
+    const originalBase = data().loadState();
+    rollbackLinkedLayer(layer);
+    const attemptBase = data().loadState();
     const sourceKey = `${data().getChatId()}:${layer}`;
     const worldInfo = payload?.worldUpdate && typeof payload.worldUpdate === 'object'
       ? JSON.stringify(payload.worldUpdate, null, 2)
       : digest;
-    const attemptBase = data().loadState();
     try {
       const result = await runTasksThenDueBig({
         memory: {
@@ -1816,7 +1856,7 @@ window.MEMORY_ENGINE = (function() {
       return result;
     } catch (error) {
       // 联动失败只撤销本次联动尝试；同楼层已完成的普通记忆提取仍应保留。
-      data().saveState(attemptBase);
+      data().saveState(originalBase);
       applyInjection();
       throw error;
     }
@@ -2003,7 +2043,7 @@ window.MEMORY_ENGINE = (function() {
     _test: {
       exponentialMemorySample, rollbackLinkedLayer, removeLinkedLayerFromState, rewindSummaryCursorForDeletedLayers,
       buildSmallHistoryContext, buildTaskReferenceContext, previousRawReference,
-      parseResponse, selectHiddenMessageIds, recentRawRoundMessageIds
+      parseResponse, selectHiddenMessageIds, recentRawRoundMessageIds, buildBigTask, requestTasks
     }
   };
 })();

@@ -10,22 +10,29 @@ window.MEMORY_ENGINE_BIG_SUMMARY_PROMPT = (function() {
 
 成文应像一篇冷静、密实的阶段纪事：以连贯段落组织，不使用标题、列表、点评或元叙事；在信息不丢失的前提下合并同类事件，保留足以让后续模型准确续接剧情的具体人物、动作、对象与结果。
 
-严格遵守用户消息给出的【本次篇幅】：正文至少 500 字，最多不超过本批全部纪要正文总字数的一半；若计算所得的一半少于 500 字，则本次上下限都按 500 字执行。汉字、数字、字母均计入字数。先组织完整内容再输出，不得靠重复、空话凑字，也不得生硬截断。
+严格遵守用户消息给出的【本次篇幅】。篇幅会依据本批纪要的信息量动态计算；信息较少时应短而完整，不得为了达到固定长文篇幅而重复、扩写或补造内容。汉字、数字、字母均计入字数。先组织完整内容再输出，不得生硬截断。
 
 【本任务输出字段】
 返回 big_summary 字符串字段。`;
 
   const clean = value => String(value == null ? '' : value).trim();
 
+  function lengthBounds(records) {
+    const source = Array.isArray(records) ? records : [];
+    const sourceLength = source.reduce((total, item) => total + clean(item?.content).length, 0);
+    const maxLength = Math.max(120, Math.ceil(sourceLength / 2));
+    const minLength = Math.min(maxLength, Math.max(80, Math.ceil(sourceLength / 4)));
+    return { sourceLength, minLength, maxLength };
+  }
+
   function buildUserPrompt(options) {
     const input = options || {};
     const records = Array.isArray(input.summaries) ? input.summaries : [];
-    const sourceLength = records.reduce((total, item) => total + clean(item?.content).length, 0);
-    const maxLength = Math.max(500, Math.ceil(sourceLength / 2));
-    return `【本次篇幅】\n总述正文不少于 500 字、不超过 ${maxLength} 字。\n\n【待整理的阶段纪要】\n${records.length ? records.map((item, index) =>
+    const { minLength, maxLength } = lengthBounds(records);
+    return `【本次篇幅】\n总述正文不少于 ${minLength} 字、不超过 ${maxLength} 字。\n\n【待整理的阶段纪要】\n${records.length ? records.map((item, index) =>
       `${index + 1}. [楼层 ${Number(item?.startLayer) || 0}-${Number(item?.endLayer) || 0}] ${clean(item?.content)}`
     ).join('\n') : '（暂无）'}`;
   }
 
-  return { SYSTEM_PROMPT, buildUserPrompt };
+  return { SYSTEM_PROMPT, buildUserPrompt, lengthBounds };
 })();
