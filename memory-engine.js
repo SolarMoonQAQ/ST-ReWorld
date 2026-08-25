@@ -1591,6 +1591,133 @@ window.MEMORY_ENGINE = (function() {
     return true;
   }
 
+  async function runTargetedSummaryTask(label, worker) {
+    const st = settings();
+    if (st.engineEnabled === false) throw new Error('记忆引擎已关闭');
+    if (running || backfillRunning || reconciling) throw new Error('已有记忆任务正在运行');
+    running = true;
+    runningLabel = label;
+    abortController = new AbortController();
+    setExternalStatus(`正在进行${label}…`);
+    window.WORLD_ENGINE_UI?.setMemoryEvolvingUI?.(true, label);
+    try {
+      const result = await worker();
+      setExternalStatus(`${label}完成`);
+      return result;
+    } catch (error) {
+      const stopped = abortController?.signal?.aborted || error?.name === 'AbortError';
+      setExternalStatus(stopped ? `${label}已停止` : `${label}失败：${error?.message || error}`, !stopped);
+      throw error;
+    } finally {
+      running = false;
+      runningLabel = '';
+      abortController = null;
+      window.WORLD_ENGINE_UI?.setMemoryEvolvingUI?.(false, '');
+    }
+  }
+
+  function summarySource(summary) {
+    const api = timelineApi();
+    if (Array.isArray(summary?.sourceRefs) && summary.sourceRefs.length) {
+      const audit = api?.auditRefs?.(summary.sourceRefs);
+      if (audit?.inherited) throw new Error('该纪要来源于其他聊天，当前聊天没有原始正文');
+      if (audit?.missing?.length) throw new Error('该纪要绑定的部分楼层已被删除，无法准确重填');
+      const refs = audit?.refs?.length ? audit.refs : summary.sourceRefs;
+      const conversation = api?.refsToConversation?.(refs) || '';
+      if (conversation) {
+        const bounds = sourceBounds(refs, summary.endLayer);
+        return { conversation, sourceRefs: clone(refs), ...bounds };
+      }
+      throw new Error('该纪要绑定的正文不在当前聊天中，无法重填');
+    }
+    const startLayer = Math.max(0, Number(summary?.startLayer) || 0);
+    const endLayer = Math.min(chat().length - 1, Math.max(startLayer, Number(summary?.endLayer) || startLayer));
+    const conversation = formatMessages(chat().slice(startLayer, endLayer + 1), startLayer);
+    const sourceRefs = api?.captureRange?.(startLayer, endLayer) || [];
+    return { conversation, sourceRefs, startLayer, endLayer };
+  }
+
+  async function regenerateSmallSummary(summaryId) {
+    return runTargetedSummaryTask('指定纪要重填', async () => {
+      let state = data().loadState(), eventMemory = ensureEventState(state);
+      const original = eventMemory.small_summaries.find(item => clean(item.id) === clean(summaryId));
+      if (!original) throw new Error('没有找到要重填的纪要');
+      if (original.source === 'world_engine') throw new Error('世界联动纪要没有对应聊天正文，不能使用 AI 重填');
+      const source = summarySource(original);
+      if (!clean(source.conversation)) throw new Error('该纪要绑定的正文不在当前聊天中，无法重填');
+      const extracted = await requestTasks({ small: source }, { baseState: state });
+      if (!clean(extracted.smallSummary)) throw new Error('API 没有返回有效纪要');
+
+      state = data().loadState();
+      eventMemory = ensureEventState(state);
+      const summary = eventMemory.small_summaries.find(item => clean(item.id) === clean(summaryId));
+      if (!summary) throw new Error('重填期间纪要已被删除');
+      summary.startLayer = source.startLayer;
+      summary.endLayer = source.endLayer;
+      summary.sourceRefs = clone(source.sourceRefs);
+      summary.sourceDigest = timelineApi()?.digestRefs?.(source.sourceRefs) || '';
+      summary.content = extracted.smallSummary;
+      summary.status = 'valid';
+      summary.revision = Math.max(1, Number(summary.revision) || 1) + 1;
+      for (const overview of eventMemory.big_summaries) {
+        if ((overview.childIds || []).some(id => clean(id) === clean(summary.id))) overview.status = 'stale';
+      }
+      data().saveState(state);
+      applyInjection();
+      refreshMemoryPanel();
+      return { updatedSmall: 1, invalidatedBig: eventMemory.big_summaries.filter(item => item.status === 'stale').length, state };
+    });
+  }
+
+  async function regenerateBigSummary(overviewId) {
+    return runTargetedSummaryTask('指定总述重填', async () => {
+      let state = data().loadState(), eventMemory = ensureEventState(state);
+      const original = eventMemory.big_summaries.find(item => clean(item.id) === clean(overviewId));
+      if (!original) throw new Error('没有找到要重填的总述');
+      let children = (original.childIds || []).map(id =>
+        eventMemory.small_summaries.find(item => clean(item.id) === clean(id))
+      ).filter(Boolean);
+      if (!children.length) {
+        children = eventMemory.small_summaries.filter(item =>
+          Number(item.startLayer) >= Number(original.startLayer)
+          && Number(item.endLayer) <= Number(original.endLayer)
+        );
+      }
+      if (!children.length) throw new Error('该总述没有可用于重填的纪要');
+      if (children.some(item => item.status !== 'valid')) throw new Error('该总述包含失效纪要，请先重填对应纪要');
+      const api = timelineApi();
+      const task = {
+        summaries: children,
+        childIds: children.map(item => item.id),
+        startLayer: Number(children[0]?.startLayer) || 0,
+        endLayer: Number(children.at(-1)?.endLayer) || 0,
+        sourceRefs: api?.unionRefs?.(children.map(item => item.sourceRefs || [])) || [],
+        childDigest: api?.hashText?.(children.map(item => `${item.id}:${item.revision || 1}:${item.sourceDigest || ''}`).join('|')) || ''
+      };
+      const extracted = await requestTasks({ big: task }, { baseState: state });
+      if (!clean(extracted.bigSummary)) throw new Error('API 没有返回有效总述');
+
+      state = data().loadState();
+      eventMemory = ensureEventState(state);
+      const overview = eventMemory.big_summaries.find(item => clean(item.id) === clean(overviewId));
+      if (!overview) throw new Error('重填期间总述已被删除');
+      Object.assign(overview, {
+        content: extracted.bigSummary,
+        childIds: task.childIds,
+        startLayer: task.startLayer,
+        endLayer: task.endLayer,
+        sourceRefs: clone(task.sourceRefs),
+        childDigest: task.childDigest,
+        status: 'valid',
+        revision: Math.max(1, Number(overview.revision) || 1) + 1
+      });
+      data().saveState(state);
+      applyInjection();
+      refreshMemoryPanel();
+      return { updatedBig: 1, state };
+    });
+  }
+
   async function reconcileHistory() {
     if (reconciling || running || backfillRunning || settings().engineEnabled === false) return { skipped: true };
     reconciling = true;
@@ -2104,7 +2231,7 @@ window.MEMORY_ENGINE = (function() {
   return {
     init, applyInjection, buildWorldEngineContext, ingestWorldEvolution, manualExtract, manualReextract, extractNow: manualExtract,
     reconcileHistory, prepareHistoryForGeneration, replayTimeline, commitManualState,
-    manualSmallSummary, manualBigSummary,
+    manualSmallSummary, manualBigSummary, regenerateSmallSummary, regenerateBigSummary,
     backfill, backfillSummaries, stopBackfill, abort,
     repairStateIndexes, replaceKnownByRecords,
     getLastDebug: () => clone(lastDebug), getBackfillStatus: () => clone(backfillStatus),

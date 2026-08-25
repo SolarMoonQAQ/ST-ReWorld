@@ -624,8 +624,8 @@ window.WORLD_ENGINE_UI = (function() {
       const collapseKey = `small:${item.id}`;
       const defaultCollapsed = index !== items.length - 1;
       return `<div class="${memoryRecordClass(collapseKey, '', defaultCollapsed)}" data-small-id="${h(item.id)}">
-      <div class="we-memory-record-head" data-memory-collapse-key="${h(collapseKey)}" role="button" tabindex="0"><div><div class="we-memory-record-title">楼层 ${h(String(item.startLayer))}–${h(String(item.endLayer))}</div><div class="we-memory-record-meta">${index < cursor ? '已归入总述' : '等待归档'} · ${h(item.id)}</div></div>
-        <div class="we-memory-record-actions">${memoryRecordToggle(collapseKey, defaultCollapsed)}<button class="we-icon-btn we-memory-edit-small" type="button" title="修改"><i class="fa-solid fa-pen"></i></button><button class="we-icon-btn we-memory-delete-small" type="button" title="删除"><i class="fa-solid fa-trash"></i></button></div>
+      <div class="we-memory-record-head" data-memory-collapse-key="${h(collapseKey)}" role="button" tabindex="0"><div><div class="we-memory-record-title">楼层 ${h(String(item.startLayer))}–${h(String(item.endLayer))}</div><div class="we-memory-record-meta">${item.status === 'stale' ? '来源失效' : (index < cursor ? '已归入总述' : '等待归档')} · ${h(item.id)}</div></div>
+        <div class="we-memory-record-actions">${memoryRecordToggle(collapseKey, defaultCollapsed)}<button class="we-icon-btn we-memory-regenerate-small" type="button" title="让 AI 重填这条纪要"><i class="fa-solid fa-rotate"></i></button><button class="we-icon-btn we-memory-edit-small" type="button" title="修改"><i class="fa-solid fa-pen"></i></button><button class="we-icon-btn we-memory-delete-small" type="button" title="删除"><i class="fa-solid fa-trash"></i></button></div>
       </div>
       ${memoryRecordBody(collapseKey, _memoryEditingSmall === item.id ? editor(item, false) : `<div class="we-memory-summary-text">${h(item.content || '（内容为空）')}</div>`, defaultCollapsed)}
     </div>`;
@@ -647,8 +647,8 @@ window.WORLD_ENGINE_UI = (function() {
       const collapseKey = `big:${big.id}`;
       const defaultCollapsed = index !== items.length - 1;
       return `<div class="${memoryRecordClass(collapseKey, 'we-memory-overview-record', defaultCollapsed)}" data-big-id="${h(big.id)}">
-      <div class="we-memory-record-head" data-memory-collapse-key="${h(collapseKey)}" role="button" tabindex="0"><div><div class="we-memory-record-title">总述 ${index + 1}</div><div class="we-memory-record-meta">楼层 ${h(String(big.startLayer))}–${h(String(big.endLayer))} · ${h(big.id)}</div></div>
-        <div class="we-memory-record-actions">${memoryRecordToggle(collapseKey, defaultCollapsed)}<button class="we-icon-btn we-memory-edit-big" type="button" title="修改"><i class="fa-solid fa-pen"></i></button><button class="we-icon-btn we-memory-delete-big" type="button" title="删除"><i class="fa-solid fa-trash"></i></button></div>
+      <div class="we-memory-record-head" data-memory-collapse-key="${h(collapseKey)}" role="button" tabindex="0"><div><div class="we-memory-record-title">总述 ${index + 1}</div><div class="we-memory-record-meta">${big.status === 'stale' ? '待重填 · ' : ''}楼层 ${h(String(big.startLayer))}–${h(String(big.endLayer))} · ${h(big.id)}</div></div>
+        <div class="we-memory-record-actions">${memoryRecordToggle(collapseKey, defaultCollapsed)}<button class="we-icon-btn we-memory-regenerate-big" type="button" title="让 AI 重填这条总述"><i class="fa-solid fa-rotate"></i></button><button class="we-icon-btn we-memory-edit-big" type="button" title="修改"><i class="fa-solid fa-pen"></i></button><button class="we-icon-btn we-memory-delete-big" type="button" title="删除"><i class="fa-solid fa-trash"></i></button></div>
       </div>
       ${memoryRecordBody(collapseKey, _memoryEditingBig === big.id ? editor(big, false) : `<div class="we-memory-summary-text">${h(big.content || '（内容为空）')}</div>`, defaultCollapsed)}
     </div>`;
@@ -898,6 +898,20 @@ window.WORLD_ENGINE_UI = (function() {
         clearMemoryEditing(); _memoryEditingSmall = id; refresh();
       };
     });
+    document.querySelectorAll('.we-memory-regenerate-small').forEach(button => {
+      button.onclick = async event => {
+        event.stopPropagation();
+        const id = button.closest('[data-small-id]')?.dataset.smallId;
+        if (!id || !confirm('让 AI 重新读取这条纪要绑定的楼层并原位重填？引用它的总述会暂时标记为待重填。')) return;
+        button.disabled = true;
+        try {
+          await window.MEMORY_ENGINE?.regenerateSmallSummary?.(id);
+          showToast('指定纪要已由 AI 重填；相关总述需要重新生成');
+          refresh();
+        } catch (error) { showToast(`纪要重填失败：${error?.message || error}`, true); }
+        finally { button.disabled = false; }
+      };
+    });
     document.querySelectorAll('.we-memory-delete-small').forEach(button => {
       button.onclick = () => {
         const id = button.closest('[data-small-id]')?.dataset.smallId;
@@ -935,6 +949,20 @@ window.WORLD_ENGINE_UI = (function() {
         const id = button.closest('[data-big-id]')?.dataset.bigId || null;
         if (id) expandMemoryRecord(`big:${id}`);
         clearMemoryEditing(); _memoryEditingBig = id; refresh();
+      };
+    });
+    document.querySelectorAll('.we-memory-regenerate-big').forEach(button => {
+      button.onclick = async event => {
+        event.stopPropagation();
+        const id = button.closest('[data-big-id]')?.dataset.bigId;
+        if (!id || !confirm('让 AI 根据这条总述原本包含的纪要重新生成，并原位替换？')) return;
+        button.disabled = true;
+        try {
+          await window.MEMORY_ENGINE?.regenerateBigSummary?.(id);
+          showToast('指定总述已由 AI 重填');
+          refresh();
+        } catch (error) { showToast(`总述重填失败：${error?.message || error}`, true); }
+        finally { button.disabled = false; }
       };
     });
     document.querySelectorAll('.we-memory-delete-big').forEach(button => {
