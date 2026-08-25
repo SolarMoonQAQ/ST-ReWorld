@@ -1345,13 +1345,21 @@ window.MEMORY_ENGINE = (function() {
   function historyAuditMessage(report, phase, error) {
     const changed = formatHistoryLayers(report?.changedLayers);
     const deleted = formatHistoryLayers(report?.deletedLayers);
+    const hasChanged = !!report?.changedLayers?.size;
+    const hasDeleted = !!report?.deletedLayers?.size;
     const subjects = [changed ? `${changed}正文已修改` : '', deleted ? `${deleted}已删除` : ''].filter(Boolean);
     if (!subjects.length) {
       if (phase === 'failed') return `历史记忆修复失败：旧记忆已停止注入，本次使用原始正文。原因：${error?.message || error}`;
       return phase === 'success' ? '历史记忆对账完成' : '正在核对历史楼层与记忆链…';
     }
     const subject = subjects.join('；');
+    if (phase === 'detected' && hasDeleted && !hasChanged) {
+      return `检测到${deleted}，正在清理依赖记录，不进行 AI 重填…`;
+    }
     if (phase === 'detected') return `检测到${subject}，正在重建相关记忆、纪要与总述…`;
+    if (phase === 'success' && hasDeleted && !hasChanged) {
+      return `${deleted}：依赖记忆、纪要与总述已清理，未进行 AI 重填。`;
+    }
     if (phase === 'success') return `${subject}：相关记忆、纪要与总述已更新，本次注入采用新正文。`;
     return `${subject}：历史记忆修复失败，旧记忆已停止注入，本次使用原始正文。原因：${error?.message || error}`;
   }
@@ -1359,6 +1367,7 @@ window.MEMORY_ENGINE = (function() {
   function auditStoredSources(state, report) {
     const api = timelineApi(), timeline = ensureTimelineState(state), eventMemory = ensureEventState(state);
     let changed = false;
+    const missingNodeIds = new Set(), missingSummaryIds = new Set();
     const refreshValidRefs = (record, audit) => {
       if (!audit?.valid || audit.inherited || audit.synthetic || !Array.isArray(audit.refs)) return;
       const oldLayers = (record.sourceRefs || []).map(ref => Number(ref.layer)).join(',');
@@ -1374,6 +1383,7 @@ window.MEMORY_ENGINE = (function() {
       if (!Array.isArray(node.sourceRefs) || !node.sourceRefs.length) continue;
       const audit = api?.auditRefs?.(node.sourceRefs);
       collectHistoryAudit(report, audit);
+      if (audit?.missing?.length) missingNodeIds.add(clean(node.id));
       refreshValidRefs(node, audit);
       const nextStatus = audit?.valid ? 'valid' : 'stale';
       if (node.status !== nextStatus) { node.status = nextStatus; changed = true; }
@@ -1382,9 +1392,46 @@ window.MEMORY_ENGINE = (function() {
       if (!Array.isArray(summary.sourceRefs) || !summary.sourceRefs.length) continue; // 旧版手工/迁移纪要保持封存。
       const audit = api?.auditRefs?.(summary.sourceRefs);
       collectHistoryAudit(report, audit);
+      if (audit?.missing?.length) missingSummaryIds.add(clean(summary.id));
       refreshValidRefs(summary, audit);
       const nextStatus = audit?.valid ? 'valid' : 'stale';
       if (summary.status !== nextStatus) { summary.status = nextStatus; changed = true; }
+    }
+    // 楼层已删除时，来源记录已经没有可供 AI 重填的事实依据。
+    // 清除依赖这些楼层的记忆/纪要，并连带移除引用纪要的总述；只有正文仍存在但哈希变化才保留 stale 进入 AI 修复。
+    if (missingNodeIds.size || missingSummaryIds.size) {
+      const removedSmallIds = new Set(missingSummaryIds);
+      const affectedBig = eventMemory.big_summaries.filter(overview =>
+        (overview.childIds || []).some(id => removedSmallIds.has(clean(id))));
+      const firstAffectedIndex = eventMemory.small_summaries.findIndex(item =>
+        removedSmallIds.has(clean(item.id)));
+      if (missingNodeIds.size) {
+        const nextNodes = timeline.nodes.filter(node => !missingNodeIds.has(clean(node.id)));
+        if (nextNodes.length !== timeline.nodes.length) {
+          timeline.nodes = nextNodes;
+          changed = true;
+        }
+      }
+      if (removedSmallIds.size) {
+        const nextSummaries = eventMemory.small_summaries.filter(item => !removedSmallIds.has(clean(item.id)));
+        if (nextSummaries.length !== eventMemory.small_summaries.length) {
+          eventMemory.small_summaries = nextSummaries;
+          changed = true;
+        }
+        const nextOverviews = eventMemory.big_summaries.filter(overview => !affectedBig.includes(overview));
+        if (nextOverviews.length !== eventMemory.big_summaries.length) {
+          eventMemory.big_summaries = nextOverviews;
+          changed = true;
+        }
+        if (firstAffectedIndex >= 0) {
+          eventMemory.big_summary_cursor = Math.min(
+            Number(eventMemory.big_summary_cursor) || 0, firstAffectedIndex
+          );
+        }
+        eventMemory.big_summary_cursor = Math.max(0, Math.min(
+          eventMemory.small_summaries.length, Number(eventMemory.big_summary_cursor) || 0
+        ));
+      }
     }
     for (const overview of eventMemory.big_summaries) {
       if (!Array.isArray(overview.childIds) || !overview.childIds.length) continue;
@@ -1740,7 +1787,9 @@ window.MEMORY_ENGINE = (function() {
         || eventMemory.big_summaries.some(item => item.status === 'stale');
       if (!needsRepair) {
         applyInjection();
-        return { repaired: false };
+        const deletedOnly = auditReport.deletedLayers.size > 0 && auditReport.changedLayers.size === 0;
+        if (deletedOnly) setExternalStatus(historyAuditMessage(auditReport, 'success'));
+        return { repaired: false, deleted: deletedOnly };
       }
       runningLabel = '历史记忆对账';
       abortController = new AbortController();
