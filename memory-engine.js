@@ -246,13 +246,43 @@ window.MEMORY_ENGINE = (function() {
       : '';
     const bigOnly = Boolean(tasks.big && !tasks.memory && !tasks.small);
     const outputRule = bigOnly
-      ? `【统一输出要求】\n总述任务优先返回一个合法 JSON 对象，不要输出 Markdown、代码围栏或解释：\n{\n  "big_summary": "总述正文"\n}\n兼容旧接口的空字段写法为："big_summary": ""。如果接口无法稳定生成 JSON，可以只返回总述正文；本地会把整段正文作为 big_summary 接收。`
+      ? `【统一输出要求】\n只返回总述正文，不要 JSON、字段名、引号、Markdown、代码围栏、解释或思考过程。本地会把整段正文作为 big_summary 接收。`
       : `【统一输出要求】\n只输出一个合法 JSON 对象，不要输出 Markdown、代码围栏或解释。严格按照以下完整结构返回；模板文字替换为实际内容：\n{\n  ${fields.join(',\n  ')}\n}`;
     return `${segments.join('\n\n=====\n\n')}\n\n${outputRule}${emptyMemory}${tone ? `\n\n【附加要求】\n${tone}` : ''}`;
   }
 
   function parseResponse(raw, tasks) {
     const text = clean(raw).replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '');
+    // 兼容旧 Prompt 或不服从格式的模型：JSON 字符串在输出上限处被截断时，
+    // 只提取 big_summary 已生成的正文，不把残缺 JSON 外壳存入总述。
+    if (tasks.big && !tasks.memory && !tasks.small) {
+      const field = /["']big_summary["']\s*:\s*"/i.exec(text);
+      if (field) {
+        const start = field.index + field[0].length;
+        let extracted = '', escaped = false;
+        for (let index = start; index < text.length; index++) {
+          const char = text[index];
+          if (escaped) {
+            const escapes = { n: '\n', r: '\r', t: '\t', b: '\b', f: '\f', '"': '"', '\\': '\\', '/': '/' };
+            if (char === 'u' && /^[0-9a-fA-F]{4}$/.test(text.slice(index + 1, index + 5))) {
+              extracted += String.fromCharCode(parseInt(text.slice(index + 1, index + 5), 16));
+              index += 4;
+            } else extracted += escapes[char] ?? char;
+            escaped = false;
+          } else if (char === '\\') escaped = true;
+          else if (char === '"') break;
+          else extracted += char;
+        }
+        if (clean(extracted)) {
+          return {
+            personal: [],
+            entities: Object.fromEntries(ENTITY_TYPES.map(type => [type, []])),
+            smallSummary: '',
+            bigSummary: clean(extracted)
+          };
+        }
+      }
+    }
     let value;
     try { value = JSON.parse(text); }
     catch (_) {
@@ -831,7 +861,8 @@ window.MEMORY_ENGINE = (function() {
     const prompt = await buildRequestPrompt(tasks, state, st);
     lastDebug = { prompt, requestPrompt: prompt, rawResult: '', apiResponse: '', parsed: null, error: '' };
     const retries = Math.max(0, Number(options?.retries ?? st.apiAutoRetries) || 0);
-    for (let attempt = 0; attempt <= retries; attempt++) {
+    let faultAttempt = 0, truncationRetried = false;
+    while (true) {
       try {
         // 总述已经与人物/实体、纪要拆成独立请求。按本批目标正文长度收紧输出上限，
         // 避免把全局 65000 token 上限交给只需数百字的总述，部分兼容端会因此极慢或超时。
@@ -839,11 +870,20 @@ window.MEMORY_ENGINE = (function() {
         const bigBounds = tasks.big
           ? window.MEMORY_ENGINE_BIG_SUMMARY_PROMPT?.lengthBounds?.(tasks.big.summaries || [])
           : null;
-        const requestMaxTokens = bigBounds
-          ? Math.min(configuredMaxTokens, Math.max(768, Math.ceil(bigBounds.maxLength * 2.5) + 256))
+        // 推理模型会把内部推理也计入 max_tokens。768 很容易在正文刚开始时耗尽，
+        // 因此保留 4096 的基础预算；长总述再按目标正文长度温和扩展。
+        const summaryTarget = Math.ceil(bigBounds?.maxLength * 2.5) + 256;
+        let requestMaxTokens = bigBounds
+          ? Math.min(configuredMaxTokens, configuredMaxTokens > 4096
+            ? Math.max(4096, summaryTarget + 1024)
+            : Math.max(768, summaryTarget))
           : configuredMaxTokens;
+        if (truncationRetried) {
+          requestMaxTokens = Math.min(configuredMaxTokens, Math.max(requestMaxTokens * 2, requestMaxTokens + 2048));
+        }
         const raw = await window.WORLD_ENGINE_API.callApi(
-          prompt, requestMaxTokens, st.temperature, abortController?.signal, st
+          prompt, requestMaxTokens, st.temperature, abortController?.signal,
+          tasks.big ? { ...st, rejectTruncatedOutput: true } : st
         );
         lastDebug.rawResult = lastDebug.apiResponse = raw;
         const parsed = parseResponse(raw, tasks);
@@ -851,10 +891,15 @@ window.MEMORY_ENGINE = (function() {
         return parsed;
       } catch (error) {
         lastDebug.error = String(error?.message || error);
-        if (abortController?.signal?.aborted || attempt >= retries) throw error;
+        if (abortController?.signal?.aborted) throw error;
+        if (tasks.big && error?.code === 'OUTPUT_TRUNCATED' && !truncationRetried) {
+          truncationRetried = true;
+          continue;
+        }
+        if (faultAttempt >= retries) throw error;
+        faultAttempt++;
       }
     }
-    throw new Error('记忆 API 请求失败');
   }
 
   async function runTasks(tasks, options) {

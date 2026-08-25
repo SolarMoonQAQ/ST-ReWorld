@@ -13,9 +13,7 @@ window.MEMORY_ENGINE_BIG_SUMMARY_PROMPT = (function() {
 严格遵守用户消息给出的【本次篇幅】。篇幅会依据本批纪要的信息量动态计算；信息较少时应短而完整，不得为了达到固定长文篇幅而重复、扩写或补造内容。汉字、数字、字母均计入字数。先组织完整内容再输出，不得生硬截断。
 
 【本任务输出格式】
-优先只输出以下 JSON，不要 Markdown、代码围栏、解释或思考过程：
-{"big_summary":"这里填写总述正文"}
-如果你的接口无法稳定输出 JSON，也可以只输出总述正文，不要输出字段名、引号或其他说明。
+只输出总述正文，不要 JSON、字段名、引号、Markdown、代码围栏、解释或思考过程。
 `;
 
   const clean = value => String(value == null ? '' : value).trim();

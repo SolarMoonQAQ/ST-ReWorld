@@ -95,7 +95,9 @@ const sandbox = {
         result.entity_updates = [];
       }
       if (prompt.includes('"small_summary": ""')) result.small_summary = '角色发现城门关闭，并从守卫处得知北方发生叛乱。';
-      if (prompt.includes('"big_summary": ""')) result.big_summary = '角色抵达城镇后发现城门关闭，并获悉北方叛乱正在影响当地。';
+      if (prompt.includes('"big_summary": ""') || prompt.includes('世界进程的总述编纂者')) {
+        result.big_summary = '角色抵达城镇后发现城门关闭，并获悉北方叛乱正在影响当地。';
+      }
       return JSON.stringify(result);
     }
   }
@@ -215,6 +217,11 @@ for (const filename of [
     sandbox.MEMORY_ENGINE._test.parseResponse('这是一段没有 JSON 外壳但内容完整的阶段总述正文。', { big: {} }).bigSummary,
     '这是一段没有 JSON 外壳但内容完整的阶段总述正文。',
     '总述接口只返回纯正文时也必须接受'
+  );
+  assert.strictEqual(
+    sandbox.MEMORY_ENGINE._test.parseResponse('{\n  "big_summary": "西营将领李定国在黑石峡全歼敌军，缴获战马二百八十', { big: {} }).bigSummary,
+    '西营将领李定国在黑石峡全歼敌军，缴获战马二百八十',
+    '总述 JSON 在字符串中途截断时必须提取正文，不得保存 JSON 外壳'
   );
 }
 
@@ -548,7 +555,7 @@ for (const filename of [
   assert.ok(calls[0].includes('"small_summary": ""'));
   assert.ok(!calls[0].includes('"personal_memory": []'));
   assert.ok(!calls[0].includes('事件记忆的总述整理器'));
-  assert.ok(calls[1].includes('"big_summary": ""'));
+  assert.ok(calls[1].includes('只返回总述正文'));
   assert.ok(!calls[1].includes('"personal_memory": []'));
   assert.deepStrictEqual(runningLabels, ['纪要', '总述']);
 

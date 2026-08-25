@@ -156,7 +156,7 @@ function seedState() {
   calls.length = 0;
   sandbox.WORLD_ENGINE_API.callApi = async (prompt, _maxTokens, _temperature, signal) => {
     calls.push({ prompt, signal });
-    if (prompt.includes('"big_summary": ""')) return JSON.stringify({ big_summary: '重新生成的总述' });
+    if (prompt.includes('世界进程的总述编纂者')) return JSON.stringify({ big_summary: '重新生成的总述' });
     return JSON.stringify({
       personal_memory: [{ name: ['角色'], known_by: [], memory: '重新生成的记忆', time: '' }],
       entity_updates: [],

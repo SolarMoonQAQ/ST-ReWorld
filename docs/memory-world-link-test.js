@@ -42,7 +42,7 @@ const sandbox = {
   WORLD_ENGINE_API: {
     getSettings() { return { memoryLinkEnabled: true }; },
     async callApi(prompt) {
-      if (prompt.includes('"big_summary": ""')) {
+      if (prompt.includes('世界进程的总述编纂者')) {
         return JSON.stringify({ big_summary: `总述${version}` });
       }
       return JSON.stringify({

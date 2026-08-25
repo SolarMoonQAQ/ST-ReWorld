@@ -258,10 +258,17 @@ window.WORLD_ENGINE_API = (function() {
     }
     const choice = data.choices?.[0];
     if (!choice) throw new Error('API 返回缺少 choices[0]');
+    const content = choice.message?.content || '';
     if (choice.finish_reason === 'length') {
       console.warn('[世界引擎] API 输出达到长度上限，将读取截断前已完整返回的字段');
+      if (settings.rejectTruncatedOutput) {
+        const error = new Error('API 输出达到长度上限，总述将提高输出预算后重试');
+        error.code = 'OUTPUT_TRUNCATED';
+        error.partial = content;
+        throw error;
+      }
     }
-    return choice.message?.content || '';
+    return content;
   }
 
   /**
@@ -317,10 +324,17 @@ window.WORLD_ENGINE_API = (function() {
     const data = requireJson(result, 'API');
     const choice = data.choices?.[0];
     if (!choice) throw new Error('API 返回缺少 choices[0]');
+    const content = choice.message?.content || '';
     if (choice.finish_reason === 'length') {
       console.warn('[世界引擎] API 输出达到长度上限，将读取截断前已完整返回的字段');
+      if (settings.rejectTruncatedOutput) {
+        const error = new Error('API 输出达到长度上限，总述将提高输出预算后重试');
+        error.code = 'OUTPUT_TRUNCATED';
+        error.partial = content;
+        throw error;
+      }
     }
-    return choice.message?.content || '';
+    return content;
   }
 
   function repairTruncatedJSON(content) {
