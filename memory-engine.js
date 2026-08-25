@@ -2157,6 +2157,202 @@ window.MEMORY_ENGINE = (function() {
     } finally { backfillRunning = false; summaryBackfillStatus.running = false; applyInjection(); }
   }
 
+  function coveredAiLayers(records, endLayer, options) {
+    const all = chat(), covered = new Set();
+    for (const record of records || []) {
+      if (!record || record.status !== 'valid' || (options?.excludeWorld && record.source === 'world_engine')) continue;
+      const refs = Array.isArray(record.sourceRefs) ? record.sourceRefs : [];
+      const assistantRefs = refs.filter(ref => ref?.role === 'assistant' && Number(ref.layer) <= endLayer);
+      if (assistantRefs.length) {
+        for (const ref of assistantRefs) covered.add(Number(ref.layer));
+        continue;
+      }
+      const start = Math.max(0, Number(record.startLayer) || 0);
+      const finish = Math.min(endLayer, Math.max(start, Number(record.endLayer) || start));
+      for (let layer = start; layer <= finish; layer++) if (all[layer] && !all[layer].is_user) covered.add(layer);
+    }
+    return covered;
+  }
+
+  function missingAiBatches(aiLayers, covered, batchSize) {
+    const batches = [], missing = aiLayers.filter(layer => !covered.has(layer));
+    let run = [];
+    for (const layer of missing) {
+      const previousIndex = run.length ? aiLayers.indexOf(run.at(-1)) : -2;
+      const currentIndex = aiLayers.indexOf(layer);
+      if (run.length && currentIndex !== previousIndex + 1) {
+        while (run.length) batches.push(run.splice(0, batchSize));
+      }
+      run.push(layer);
+    }
+    while (run.length) batches.push(run.splice(0, batchSize));
+    return batches;
+  }
+
+  function taskForAiLayers(layers) {
+    const all = chat(), firstAi = layers[0], endLayer = layers.at(-1);
+    const startLayer = firstAi > 0 && all[firstAi - 1]?.is_user ? firstAi - 1 : firstAi;
+    return {
+      startLayer,
+      endLayer,
+      conversation: formatMessages(all.slice(startLayer, endLayer + 1), startLayer),
+      sourceRefs: timelineApi()?.captureRange?.(startLayer, endLayer) || []
+    };
+  }
+
+  async function appendMissingBigSummary(children, st) {
+    const api = timelineApi();
+    const task = {
+      summaries: children,
+      childIds: children.map(item => item.id),
+      startLayer: Number(children[0]?.startLayer) || 0,
+      endLayer: Number(children.at(-1)?.endLayer) || 0,
+      sourceRefs: api?.unionRefs?.(children.map(item => item.sourceRefs || [])) || [],
+      childDigest: api?.hashText?.(children.map(item => `${item.id}:${item.revision || 1}:${item.sourceDigest || ''}`).join('|')) || ''
+    };
+    abortController = new AbortController();
+    const extracted = await requestTasks({ big: task }, { baseState: data().loadState(), retries: st.backfillRetries });
+    if (!clean(extracted.bigSummary)) throw new Error('API 没有返回有效总述');
+    const state = data().loadState(), eventMemory = ensureEventState(state);
+    eventMemory.big_summaries.push({
+      id: nextBigSummaryId(eventMemory),
+      startLayer: task.startLayer,
+      endLayer: task.endLayer,
+      content: extracted.bigSummary,
+      childIds: clone(task.childIds),
+      childDigest: task.childDigest,
+      sourceRefs: clone(task.sourceRefs),
+      originChatId: data()?.getChatId?.() || 'default',
+      status: 'valid',
+      revision: 1
+    });
+    data().saveState(state);
+  }
+
+  function refreshBigSummaryCursor(state) {
+    const eventMemory = ensureEventState(state), covered = new Set();
+    for (const overview of eventMemory.big_summaries) {
+      if (overview.status !== 'valid') continue;
+      for (const id of overview.childIds || []) covered.add(clean(id));
+    }
+    let cursor = 0;
+    while (cursor < eventMemory.small_summaries.length && covered.has(clean(eventMemory.small_summaries[cursor].id))) cursor++;
+    eventMemory.big_summary_cursor = cursor;
+    return state;
+  }
+
+  async function repairCurrentHistory() {
+    if (backfillRunning || running || reconciling) throw new Error('已有记忆任务正在运行');
+    const st = settings(), all = chat();
+    if (st.engineEnabled === false) throw new Error('记忆引擎已关闭');
+    // 自动修复始终扫描到当前聊天最后一楼；旧的 backfillEndLayer 只影响“从头开始重填”。
+    const end = Math.max(0, all.length - 1);
+    const opening = ignoreFirstLayer(st);
+    const aiLayers = all.map((message, index) => (
+      message && !message.is_user && index <= end && !(opening && index === 0) ? index : -1
+    )).filter(index => index >= 0);
+    if (!aiLayers.length) throw new Error('当前楼层之前没有可检查的 AI 楼层');
+
+    window.WORLD_ENGINE_CHATCACHE?.forScope?.('memory')?.createSnapshot?.('记忆自动修复前备份');
+    data().saveCheckpoint(data().loadState());
+    setBackfillStatus(0, 0, '正在审计已有记忆、纪要与总述…');
+    setSummaryBackfillStatus(0, 0, '正在审计已有记忆、纪要与总述…');
+    try {
+      await reconcileHistory();
+    } catch (error) {
+      console.warn('[记忆引擎] 历史审计存在无法直接修复的记录，将继续扫描缺口', error);
+    }
+
+    backfillRunning = true;
+    try {
+      let state = data().loadState();
+      const timeline = ensureTimelineState(state), eventMemory = ensureEventState(state);
+      const memoryCovered = coveredAiLayers(
+        timeline.nodes.filter(node => node.kind === 'memory'), end
+      );
+      const summaryCovered = coveredAiLayers(eventMemory.small_summaries, end, { excludeWorld: true });
+      const memoryBatches = missingAiBatches(aiLayers, memoryCovered, Math.max(1, parseInt(st.backfillBatchSize) || 5));
+      const summaryBatches = missingAiBatches(aiLayers, summaryCovered, Math.max(1, parseInt(st.summaryBackfillSmallEveryX) || 5));
+      const total = memoryBatches.length + summaryBatches.length;
+      let completed = 0;
+
+      for (const layers of memoryBatches) {
+        if (!backfillRunning) break;
+        const task = taskForAiLayers(layers);
+        setBackfillStatus(completed, total, `正在补全人物与实体楼层 ${layers[0]}-${layers.at(-1)}`);
+        await extractConversation(task.conversation, {
+          ...task, layer: task.endLayer, retries: st.backfillRetries,
+          saveCheckpoint: false, allowWhileBackfill: true
+        });
+        completed++;
+      }
+
+      for (const layers of summaryBatches) {
+        if (!backfillRunning) break;
+        const task = taskForAiLayers(layers);
+        setSummaryBackfillStatus(completed, total, `正在补全纪要楼层 ${layers[0]}-${layers.at(-1)}`);
+        await runTasks({ small: task }, {
+          baseState: data().loadState(), retries: st.backfillRetries,
+          saveCheckpoint: false, allowWhileBackfill: true
+        });
+        completed++;
+      }
+
+      state = data().loadState();
+      for (const overview of ensureEventState(state).big_summaries.slice()) {
+        if (!backfillRunning) break;
+        if (overview.status === 'stale') {
+          setSummaryBackfillStatus(completed, total, `正在修复总述 ${overview.id}`);
+          abortController = new AbortController();
+          await repairBigSummary(overview.id);
+        }
+      }
+
+      state = data().loadState();
+      const currentEvent = ensureEventState(state);
+      const validSmall = currentEvent.small_summaries.filter(item => item.status === 'valid' && Number(item.endLayer) <= end);
+      const coveredSmallIds = new Set(currentEvent.big_summaries.filter(item => item.status === 'valid')
+        .flatMap(item => item.childIds || []).map(clean));
+      const threshold = Math.max(1, parseInt(st.summaryBackfillBigEveryX) || 5);
+      let pending = [];
+      for (const summary of validSmall) {
+        if (coveredSmallIds.has(clean(summary.id))) {
+          pending = [];
+          continue;
+        }
+        pending.push(summary);
+        if (pending.length === threshold) {
+          if (!backfillRunning) break;
+          setSummaryBackfillStatus(completed, total, `正在补全楼层 ${pending[0].startLayer}-${pending.at(-1).endLayer} 的总述`);
+          await appendMissingBigSummary(pending, st);
+          for (const item of pending) coveredSmallIds.add(clean(item.id));
+          pending = [];
+        }
+      }
+
+      state = refreshBigSummaryCursor(data().loadState());
+      data().saveState(state);
+      const message = backfillRunning
+        ? `自动检查完成：补全人物实体 ${memoryBatches.length} 批、纪要 ${summaryBatches.length} 批，并修复缺失总述`
+        : '自动检查已停止';
+      setBackfillStatus(total, total, message);
+      setSummaryBackfillStatus(total, total, message);
+      refreshMemoryPanel();
+      return { memoryBatches: memoryBatches.length, summaryBatches: summaryBatches.length, state };
+    } catch (error) {
+      const message = `自动检查失败：${error?.message || error}`;
+      setBackfillStatus(backfillStatus.current, backfillStatus.total, message);
+      setSummaryBackfillStatus(summaryBackfillStatus.current, summaryBackfillStatus.total, message);
+      throw error;
+    } finally {
+      backfillRunning = false;
+      backfillStatus.running = false;
+      summaryBackfillStatus.running = false;
+      abortController = null;
+      applyInjection();
+    }
+  }
+
   function stopBackfill() {
     backfillRunning = false;
     abortController?.abort();
@@ -2232,7 +2428,7 @@ window.MEMORY_ENGINE = (function() {
     init, applyInjection, buildWorldEngineContext, ingestWorldEvolution, manualExtract, manualReextract, extractNow: manualExtract,
     reconcileHistory, prepareHistoryForGeneration, replayTimeline, commitManualState,
     manualSmallSummary, manualBigSummary, regenerateSmallSummary, regenerateBigSummary,
-    backfill, backfillSummaries, stopBackfill, abort,
+    backfill, backfillSummaries, repairCurrentHistory, stopBackfill, abort,
     repairStateIndexes, replaceKnownByRecords,
     getLastDebug: () => clone(lastDebug), getBackfillStatus: () => clone(backfillStatus),
     getSummaryBackfillStatus: () => clone(summaryBackfillStatus),

@@ -42,7 +42,8 @@ window.MEMORY_ENGINE_SETTINGS = (function() {
     summaryBackfillSmallEveryX: 5,
     summaryBackfillBigEveryX: 5,
     backfillRetries: 2,
-    backfillEndLayer: 0
+    backfillEndLayer: 0,
+    backfillMode: 'full'
   });
 
   let cached = null;

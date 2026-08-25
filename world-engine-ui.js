@@ -1219,6 +1219,7 @@ window.WORLD_ENGINE_UI = (function() {
     const backfillBatch = Math.max(1, parseInt(settings.backfillBatchSize) || 5);
     const backfillEnd = Math.max(0, parseInt(settings.backfillEndLayer) || 0);
     const backfillRetries = Math.max(0, parseInt(settings.backfillRetries) || 0);
+    const backfillMode = settings.backfillMode === 'current' ? 'current' : 'full';
     const summaryBackfillSmallEveryX = Math.max(1, parseInt(settings.summaryBackfillSmallEveryX) || 5);
     const summaryBackfillBigEveryX = Math.max(1, parseInt(settings.summaryBackfillBigEveryX) || 5);
     const apiTemperature = Number.isFinite(Number(settings.temperature)) ? Math.max(0, Number(settings.temperature)) : 0.2;
@@ -1382,10 +1383,19 @@ window.WORLD_ENGINE_UI = (function() {
         <div class="we-input-group" style="flex:1;min-width:120px;margin-bottom:0;"><label>总述回填：每 Y 条纪要</label>
           <input type="number" id="we-memory-summary-backfill-big-every" min="1" step="1" value="${summaryBackfillBigEveryX}"></div>
       </div>
+      <div class="we-input-group" style="margin-top:6px;">
+        <label>批量重填模式</label>
+        <select id="we-memory-backfill-mode" style="width:100%;">
+          <option value="full" ${backfillMode === 'full' ? 'selected' : ''}>从头开始重填（清空后重建）</option>
+          <option value="current" ${backfillMode === 'current' ? 'selected' : ''}>按当前聊天自动修复（只补缺失/损坏内容）</option>
+        </select>
+        <div style="font-size:11px;color:var(--we-text3);margin-top:3px;">自动修复不会清空现有记忆；会直接检查到当前聊天最后一楼，补人物/实体、纪要和缺失总述。正常记录不会重复生成。</div>
+      </div>
       <div class="we-hint" id="we-memory-person-backfill-status" style="margin:6px 0;"></div>
       <div style="display:flex;gap:6px;flex-wrap:wrap;margin:6px 0;">
         <button class="we-btn we-btn-primary" id="we-memory-backfill-start">▶ 重填人物与实体</button>
         <button class="we-btn we-btn-primary" id="we-memory-summary-backfill-start">▶ 重填纪要与总述</button>
+        <button class="we-btn" id="we-memory-repair-current"><i class="fa-solid fa-wand-magic-sparkles"></i> 自动修复到当前楼层</button>
         <button class="we-btn" id="we-memory-backfill-stop">■ 停止</button>
       </div>
       <div class="we-hint" id="we-memory-summary-backfill-status" style="margin:6px 0;"></div>`;
@@ -5046,7 +5056,8 @@ window.WORLD_ENGINE_UI = (function() {
           summaryBackfillSmallEveryX: Math.max(1, parseInt(gv('we-memory-summary-backfill-small-every')) || 5),
           summaryBackfillBigEveryX: Math.max(1, parseInt(gv('we-memory-summary-backfill-big-every')) || 5),
           backfillEndLayer: Math.max(0, parseInt(gv('we-memory-backfill-end')) || 0),
-          backfillRetries: Math.max(0, parseInt(gv('we-memory-backfill-retries')) || 0)
+          backfillRetries: Math.max(0, parseInt(gv('we-memory-backfill-retries')) || 0),
+          backfillMode: gv('we-memory-backfill-mode') === 'current' ? 'current' : 'full'
         };
         window.MEMORY_ENGINE_SETTINGS?.saveSettings(memorySettings);
         window.MEMORY_ENGINE?.applyInjection?.();
@@ -5156,11 +5167,28 @@ window.WORLD_ENGINE_UI = (function() {
     if (memoryBackfillStart) {
       memoryBackfillStart.onclick = async () => {
         if (window.MEMORY_ENGINE && typeof window.MEMORY_ENGINE.backfill === 'function') {
-          try { await window.MEMORY_ENGINE.backfill(); }
+          try {
+            const mode = document.getElementById('we-memory-backfill-mode')?.value;
+            await (mode === 'current'
+              ? window.MEMORY_ENGINE.repairCurrentHistory?.()
+              : window.MEMORY_ENGINE.backfill());
+          }
           catch (error) { showToast(`记忆重填失败：${error?.message || error}`, true); }
           return;
         }
         showToast('记忆引擎尚未加载', true);
+      };
+    }
+    const memoryRepairCurrent = document.getElementById('we-memory-repair-current');
+    if (memoryRepairCurrent) {
+      memoryRepairCurrent.onclick = async () => {
+        memoryRepairCurrent.disabled = true;
+        try {
+          await window.MEMORY_ENGINE?.repairCurrentHistory?.();
+          showToast('已按当前聊天楼层完成记忆、纪要与总述自动修复');
+          refresh();
+        } catch (error) { showToast(`自动修复失败：${error?.message || error}`, true); }
+        finally { memoryRepairCurrent.disabled = false; }
       };
     }
     const memoryRunNow = document.getElementById('we-memory-run-now');
@@ -5187,7 +5215,12 @@ window.WORLD_ENGINE_UI = (function() {
     if (memorySummaryBackfillStart) {
       memorySummaryBackfillStart.onclick = async () => {
         memorySummaryBackfillStart.disabled = true;
-        try { await window.MEMORY_ENGINE?.backfillSummaries?.(); }
+        try {
+          const mode = document.getElementById('we-memory-backfill-mode')?.value;
+          await (mode === 'current'
+            ? window.MEMORY_ENGINE?.repairCurrentHistory?.()
+            : window.MEMORY_ENGINE?.backfillSummaries?.());
+        }
         catch (error) { showToast(`纪要与总述重填失败：${error?.message || error}`, true); }
         finally { memorySummaryBackfillStart.disabled = false; }
       };
