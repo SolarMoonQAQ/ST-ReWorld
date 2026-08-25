@@ -7,6 +7,8 @@ const vm = require('vm');
 const root = path.resolve(__dirname, '..');
 const stored = new Map();
 const calls = [];
+let failText = '';
+let failuresLeft = 0;
 const chat = [
   { is_user: false, name: '角色', mes: '开场白' },
   { is_user: true, name: '用户', mes: '进入黑石峡。' },
@@ -57,6 +59,10 @@ const sandbox = {
   WORLD_ENGINE_API: {
     async callApi(prompt) {
       calls.push(prompt);
+      if (failuresLeft > 0 && failText && prompt.includes(failText)) {
+        failuresLeft--;
+        throw new Error('模拟中间楼层失败');
+      }
       if (prompt.includes('世界进程的总述编纂者')) return '李定国在黑石峡取胜并缴获二百八十匹战马。';
       if (prompt.includes('"small_summary": ""')) return JSON.stringify({ small_summary: `纪要${calls.length}` });
       return JSON.stringify({
@@ -108,5 +114,65 @@ for (const filename of [
   assert.strictEqual(second.summaryBatches, 0);
   assert.strictEqual(calls.length, callCount, '数据完整时再次自动修复不得重复调用 API');
   assert.strictEqual(state.event_memory.big_summaries.length, 1);
+
+  chat.push(
+    { is_user: true, name: '用户', mes: '第一批新增。' },
+    { is_user: false, name: '角色', mes: '第一批新增结果。' },
+    { is_user: true, name: '用户', mes: '第二批故障。' },
+    { is_user: false, name: '角色', mes: '第二批故障结果。' },
+    { is_user: true, name: '用户', mes: '第三批新增。' },
+    { is_user: false, name: '角色', mes: '第三批新增结果。' }
+  );
+  sandbox.MEMORY_ENGINE_DATA.saveState(sandbox.MEMORY_ENGINE_DATA.defaultState());
+  calls.length = 0;
+  failText = '第二批故障';
+  failuresLeft = 1;
+  await sandbox.MEMORY_ENGINE.backfill();
+  state = sandbox.MEMORY_ENGINE_DATA.loadState();
+  let memoryEnds = state.timeline.nodes.filter(node => node.kind === 'memory').map(node => node.endLayer);
+  assert.ok(memoryEnds.includes(6) && memoryEnds.includes(10), '手动重填中间批失败后必须继续处理后续楼层');
+  assert.ok(!memoryEnds.includes(8), '失败楼层不得误标为已完成');
+  assert.ok(sandbox.MEMORY_ENGINE.getBackfillStatus().message.includes('跳过 1 批'));
+
+  failText = '';
+  const repaired = await sandbox.MEMORY_ENGINE.repairCurrentHistory();
+  state = sandbox.MEMORY_ENGINE_DATA.loadState();
+  memoryEnds = state.timeline.nodes.filter(node => node.kind === 'memory').map(node => node.endLayer);
+  assert.strictEqual(repaired.failedMemoryBatches, 0);
+  assert.ok(memoryEnds.includes(8), '自动修复必须再次尝试先前跳过的楼层');
+  assert.strictEqual(JSON.stringify(memoryEnds), JSON.stringify([...memoryEnds].sort((a, b) => a - b)),
+    '补回较早楼层后人物实体时间链仍必须按楼层顺序排列');
+  assert.strictEqual(state.chatLayer, 10, '补回较早人物实体楼层不得让推进游标倒退');
+
+  sandbox.MEMORY_ENGINE_DATA.saveState(sandbox.MEMORY_ENGINE_DATA.defaultState());
+  failText = '第二批故障';
+  failuresLeft = 1;
+  await sandbox.MEMORY_ENGINE.backfillSummaries();
+  state = sandbox.MEMORY_ENGINE_DATA.loadState();
+  let summaryEnds = state.event_memory.small_summaries.map(item => item.endLayer);
+  assert.ok(summaryEnds.includes(10), '纪要手动重填中间批失败后必须继续处理后续楼层');
+  assert.ok(!summaryEnds.includes(8), '失败纪要不得误标为已完成');
+  failText = '';
+  await sandbox.MEMORY_ENGINE.repairCurrentHistory();
+  state = sandbox.MEMORY_ENGINE_DATA.loadState();
+  summaryEnds = state.event_memory.small_summaries.map(item => item.endLayer);
+  assert.ok(summaryEnds.includes(8), '自动修复必须再次尝试手动重填跳过的纪要楼层');
+  assert.strictEqual(JSON.stringify(summaryEnds), JSON.stringify([...summaryEnds].sort((a, b) => a - b)),
+    '补回较早纪要后仍必须按楼层顺序排列');
+  assert.strictEqual(state.event_memory.small_summary_layer, 10, '补回较早纪要不得让纪要游标倒退');
+
+  sandbox.MEMORY_ENGINE_DATA.saveState(sandbox.MEMORY_ENGINE_DATA.defaultState());
+  failText = '第二批故障';
+  failuresLeft = 1;
+  const skipped = await sandbox.MEMORY_ENGINE.repairCurrentHistory();
+  state = sandbox.MEMORY_ENGINE_DATA.loadState();
+  memoryEnds = state.timeline.nodes.filter(node => node.kind === 'memory').map(node => node.endLayer);
+  assert.strictEqual(skipped.failedMemoryBatches, 1, '自动修复必须记录失败批次而不是整体中止');
+  assert.ok(memoryEnds.includes(10) && !memoryEnds.includes(8), '自动修复失败后仍必须继续处理后续楼层');
+  failText = '';
+  await sandbox.MEMORY_ENGINE.repairCurrentHistory();
+  state = sandbox.MEMORY_ENGINE_DATA.loadState();
+  assert.ok(state.timeline.nodes.filter(node => node.kind === 'memory').some(node => node.endLayer === 8),
+    '再次自动修复必须补回上次失败楼层');
   console.log('current layer automatic repair tests passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });

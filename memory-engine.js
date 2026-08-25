@@ -694,7 +694,14 @@ window.MEMORY_ENGINE = (function() {
       createdAt: Date.now(),
       updatedAt: Date.now()
     };
-    timeline.nodes.push(node);
+    if (node.kind === 'memory') {
+      const insertAt = timeline.nodes.findIndex(item => (
+        clean(item?.originChatId) === clean(node.originChatId)
+        && Number(item?.endLayer) > Number(node.endLayer)
+      ));
+      if (insertAt >= 0) timeline.nodes.splice(insertAt, 0, node);
+      else timeline.nodes.push(node);
+    } else timeline.nodes.push(node);
     return node;
   }
 
@@ -902,6 +909,21 @@ window.MEMORY_ENGINE = (function() {
     }
   }
 
+  function insertSmallSummary(eventMemory, summary) {
+    const insertAt = eventMemory.small_summaries.findIndex(item => (
+      Number(item?.endLayer) > Number(summary.endLayer)
+      || (Number(item?.endLayer) === Number(summary.endLayer)
+        && Number(item?.startLayer) > Number(summary.startLayer))
+    ));
+    if (insertAt < 0) {
+      eventMemory.small_summaries.push(summary);
+      return eventMemory.small_summaries.length - 1;
+    }
+    eventMemory.small_summaries.splice(insertAt, 0, summary);
+    eventMemory.big_summary_cursor = Math.min(Number(eventMemory.big_summary_cursor) || 0, insertAt);
+    return insertAt;
+  }
+
   async function runTasks(tasks, options) {
     if (running && !options?.allowWhileBackfill) return { skipped: true, reason: 'running' };
     if (!tasks?.memory && !tasks?.small && !tasks?.big) return { skipped: true, reason: 'no_tasks' };
@@ -918,7 +940,7 @@ window.MEMORY_ENGINE = (function() {
       const before = options?.baseState ? clone(options.baseState) : data().loadState();
       const extracted = await requestTasks(tasks, { ...options, baseState: before });
       if (options?.saveCheckpoint !== false) data().saveCheckpoint(before);
-      const next = clone(before);
+      let next = clone(before);
       const memorySourceDigest = tasks.memory && Array.isArray(tasks.memory.sourceRefs) && tasks.memory.sourceRefs.length
         ? timelineApi()?.digestRefs?.(tasks.memory.sourceRefs) || '' : '';
       const memoryAlreadyStored = memorySourceDigest && ensureTimelineState(next).nodes.some(node =>
@@ -929,7 +951,10 @@ window.MEMORY_ENGINE = (function() {
       const entityChanges = applyMemory
         ? mergeEntityMemories(next, extracted.entities)
         : { entities: 0, history: 0, descriptions: 0 };
-      if (applyMemory) appendTimelineNode(next, extracted, tasks.memory, options);
+      if (applyMemory) {
+        appendTimelineNode(next, extracted, tasks.memory, options);
+        next = replayTimeline(next);
+      }
       const eventMemory = ensureEventState(next);
       let addedSmall = 0, updatedBig = 0;
       if (tasks.small && extracted.smallSummary) {
@@ -958,7 +983,7 @@ window.MEMORY_ENGINE = (function() {
               ));
             }
           }
-          eventMemory.small_summaries.push({
+          insertSmallSummary(eventMemory, {
             id: nextSmallSummaryId(eventMemory),
             startLayer: Number(tasks.small.startLayer) || 0,
             endLayer: Number(tasks.small.endLayer) || 0,
@@ -971,11 +996,15 @@ window.MEMORY_ENGINE = (function() {
           });
           addedSmall = 1;
         }
-        eventMemory.small_summary_layer = Number(tasks.small.endLayer) || 0;
+        const summaryEnd = Number(tasks.small.endLayer);
+        const previousSummaryLayer = Number(eventMemory.small_summary_layer);
+        eventMemory.small_summary_layer = Number.isFinite(summaryEnd)
+          ? Math.max(Number.isFinite(previousSummaryLayer) ? previousSummaryLayer : -1, summaryEnd)
+          : eventMemory.small_summary_layer;
       }
       if (options?.worldDigestMinute?.content) {
         const linked = options.worldDigestMinute;
-        eventMemory.small_summaries.push({
+        insertSmallSummary(eventMemory, {
           id: nextSmallSummaryId(eventMemory),
           startLayer: Number(linked.layer) || 0,
           endLayer: Number(linked.layer) || 0,
@@ -1008,8 +1037,9 @@ window.MEMORY_ENGINE = (function() {
       }
       const added = addedPersonal + entityChanges.entities + entityChanges.history + entityChanges.descriptions;
       if (tasks.memory) {
-        if (applyMemory) next.round = Math.max(0, Number(next.round) || 0) + 1;
-        next.chatLayer = Number.isFinite(Number(options?.layer)) ? Number(options.layer) : currentLayer();
+        const nextLayer = Number.isFinite(Number(options?.layer)) ? Number(options.layer) : currentLayer();
+        const previousLayer = Number(next.chatLayer);
+        next.chatLayer = Math.max(Number.isFinite(previousLayer) ? previousLayer : -1, nextLayer);
       }
       data().saveState(next);
       window.WORLD_ENGINE_CHATCACHE?.forScope?.('memory')?.afterEvolution?.();
@@ -2164,18 +2194,27 @@ window.MEMORY_ENGINE = (function() {
       chatLayer: null,
       timeline: null
     });
+    let failedBatches = 0;
     try {
       for (let i = 0; i < batches.length && backfillRunning; i++) {
         const layers = batches[i], start = Math.max(0, layers[0] - 1), finish = layers.at(-1);
         setBackfillStatus(i, batches.length, `正在重填 ${i + 1} / ${batches.length}`);
-        await extractConversation(formatMessages(all.slice(start, finish + 1), start), {
-          startLayer: start,
-          endLayer: finish,
-          sourceRefs: timelineApi()?.captureRange?.(start, finish) || [],
-          layer: finish, retries: st.backfillRetries, saveCheckpoint: true, allowWhileBackfill: true
-        });
+        try {
+          await extractConversation(formatMessages(all.slice(start, finish + 1), start), {
+            startLayer: start,
+            endLayer: finish,
+            sourceRefs: timelineApi()?.captureRange?.(start, finish) || [],
+            layer: finish, retries: st.backfillRetries, saveCheckpoint: true, allowWhileBackfill: true
+          });
+        } catch (error) {
+          if (!backfillRunning) break;
+          failedBatches++;
+          console.warn(`[记忆引擎] 人物实体重填批次 ${i + 1} 跳过`, error);
+        }
       }
-      setBackfillStatus(batches.length, batches.length, backfillRunning ? '记忆重填完成' : '记忆重填已停止');
+      setBackfillStatus(batches.length, batches.length, backfillRunning
+        ? (failedBatches ? `记忆重填完成，跳过 ${failedBatches} 批（可用自动修复重试）` : '记忆重填完成')
+        : '记忆重填已停止');
     } catch (error) {
       setBackfillStatus(backfillStatus.current, batches.length, `重填失败：${error?.message || error}`);
       throw error;
@@ -2199,6 +2238,7 @@ window.MEMORY_ENGINE = (function() {
       ...original,
       event_memory: { small_summaries: [], big_summaries: [], small_summary_layer: null, big_summary_cursor: 0 }
     });
+    let failedBatches = 0, hasSummaryGap = false;
     try {
       for (let i = 0; i < batches.length && backfillRunning; i++) {
         const layers = batches[i], firstAi = layers[0], finish = layers.at(-1);
@@ -2211,11 +2251,26 @@ window.MEMORY_ENGINE = (function() {
         };
         const state = data().loadState();
         setSummaryBackfillStatus(i, batches.length, `正在重填纪要与总述 ${i + 1} / ${batches.length}`);
-        await runTasksThenDueBig({ small: smallTask }, {
-          baseState: state, retries: st.backfillRetries, saveCheckpoint: true, allowWhileBackfill: true
-        }, st.summaryBackfillBigEveryX);
+        try {
+          const options = {
+            baseState: state, retries: st.backfillRetries, saveCheckpoint: true, allowWhileBackfill: true
+          };
+          if (hasSummaryGap) await runTasks({ small: smallTask }, options);
+          else await runTasksThenDueBig({ small: smallTask }, options, st.summaryBackfillBigEveryX);
+        } catch (error) {
+          if (!backfillRunning) break;
+          failedBatches++;
+          const digest = timelineApi()?.digestRefs?.(smallTask.sourceRefs || []) || '';
+          const stored = digest && ensureEventState(data().loadState()).small_summaries.some(item =>
+            item.status === 'valid' && clean(item.sourceDigest) === digest
+          );
+          if (!stored) hasSummaryGap = true;
+          console.warn(`[记忆引擎] 纪要重填批次 ${i + 1} 跳过`, error);
+        }
       }
-      setSummaryBackfillStatus(batches.length, batches.length, backfillRunning ? '纪要与总述重填完成' : '纪要与总述重填已停止');
+      setSummaryBackfillStatus(batches.length, batches.length, backfillRunning
+        ? (failedBatches ? `纪要重填完成，跳过 ${failedBatches} 批（可用自动修复重试）` : '纪要与总述重填完成')
+        : '纪要与总述重填已停止');
     } catch (error) {
       setSummaryBackfillStatus(summaryBackfillStatus.current, batches.length, `纪要与总述重填失败：${error?.message || error}`);
       throw error;
@@ -2339,16 +2394,22 @@ window.MEMORY_ENGINE = (function() {
       const memoryBatches = missingAiBatches(aiLayers, memoryCovered, Math.max(1, parseInt(st.backfillBatchSize) || 5));
       const summaryBatches = missingAiBatches(aiLayers, summaryCovered, Math.max(1, parseInt(st.summaryBackfillSmallEveryX) || 5));
       const total = memoryBatches.length + summaryBatches.length;
-      let completed = 0;
+      let completed = 0, failedMemoryBatches = 0, failedSummaryBatches = 0, failedBigSummaries = 0;
 
       for (const layers of memoryBatches) {
         if (!backfillRunning) break;
         const task = taskForAiLayers(layers);
         setBackfillStatus(completed, total, `正在补全人物与实体楼层 ${layers[0]}-${layers.at(-1)}`);
-        await extractConversation(task.conversation, {
-          ...task, layer: task.endLayer, retries: st.backfillRetries,
-          saveCheckpoint: false, allowWhileBackfill: true
-        });
+        try {
+          await extractConversation(task.conversation, {
+            ...task, layer: task.endLayer, retries: st.backfillRetries,
+            saveCheckpoint: false, allowWhileBackfill: true
+          });
+        } catch (error) {
+          if (!backfillRunning) break;
+          failedMemoryBatches++;
+          console.warn(`[记忆引擎] 自动修复人物实体楼层 ${layers[0]}-${layers.at(-1)} 跳过`, error);
+        }
         completed++;
       }
 
@@ -2356,10 +2417,16 @@ window.MEMORY_ENGINE = (function() {
         if (!backfillRunning) break;
         const task = taskForAiLayers(layers);
         setSummaryBackfillStatus(completed, total, `正在补全纪要楼层 ${layers[0]}-${layers.at(-1)}`);
-        await runTasks({ small: task }, {
-          baseState: data().loadState(), retries: st.backfillRetries,
-          saveCheckpoint: false, allowWhileBackfill: true
-        });
+        try {
+          await runTasks({ small: task }, {
+            baseState: data().loadState(), retries: st.backfillRetries,
+            saveCheckpoint: false, allowWhileBackfill: true
+          });
+        } catch (error) {
+          if (!backfillRunning) break;
+          failedSummaryBatches++;
+          console.warn(`[记忆引擎] 自动修复纪要楼层 ${layers[0]}-${layers.at(-1)} 跳过`, error);
+        }
         completed++;
       }
 
@@ -2369,18 +2436,26 @@ window.MEMORY_ENGINE = (function() {
         if (overview.status === 'stale') {
           setSummaryBackfillStatus(completed, total, `正在修复总述 ${overview.id}`);
           abortController = new AbortController();
-          await repairBigSummary(overview.id);
+          try {
+            await repairBigSummary(overview.id);
+          } catch (error) {
+            if (!backfillRunning) break;
+            failedBigSummaries++;
+            console.warn(`[记忆引擎] 自动修复总述 ${overview.id} 跳过`, error);
+          }
         }
       }
 
       state = data().loadState();
       const currentEvent = ensureEventState(state);
+      const repairedSummaryCovered = coveredAiLayers(currentEvent.small_summaries, end, { excludeWorld: true });
+      const hasSummaryGaps = aiLayers.some(layer => !repairedSummaryCovered.has(layer));
       const validSmall = currentEvent.small_summaries.filter(item => item.status === 'valid' && Number(item.endLayer) <= end);
       const coveredSmallIds = new Set(currentEvent.big_summaries.filter(item => item.status === 'valid')
         .flatMap(item => item.childIds || []).map(clean));
       const threshold = Math.max(1, parseInt(st.summaryBackfillBigEveryX) || 5);
       let pending = [];
-      for (const summary of validSmall) {
+      for (const summary of hasSummaryGaps ? [] : validSmall) {
         if (coveredSmallIds.has(clean(summary.id))) {
           pending = [];
           continue;
@@ -2389,7 +2464,15 @@ window.MEMORY_ENGINE = (function() {
         if (pending.length === threshold) {
           if (!backfillRunning) break;
           setSummaryBackfillStatus(completed, total, `正在补全楼层 ${pending[0].startLayer}-${pending.at(-1).endLayer} 的总述`);
-          await appendMissingBigSummary(pending, st);
+          try {
+            await appendMissingBigSummary(pending, st);
+          } catch (error) {
+            if (!backfillRunning) break;
+            failedBigSummaries++;
+            console.warn(`[记忆引擎] 自动补全总述楼层 ${pending[0].startLayer}-${pending.at(-1).endLayer} 跳过`, error);
+            pending = [];
+            continue;
+          }
           for (const item of pending) coveredSmallIds.add(clean(item.id));
           pending = [];
         }
@@ -2397,12 +2480,21 @@ window.MEMORY_ENGINE = (function() {
       state = refreshBigSummaryCursor(data().loadState());
       data().saveState(state);
       const message = backfillRunning
-        ? `自动检查完成：补全人物实体 ${memoryBatches.length} 批、纪要 ${summaryBatches.length} 批，并修复缺失总述`
+        ? ((failedMemoryBatches || failedSummaryBatches || failedBigSummaries)
+          ? `自动检查完成：跳过人物实体 ${failedMemoryBatches} 批、纪要 ${failedSummaryBatches} 批、总述 ${failedBigSummaries} 条；下次可继续修复`
+          : `自动检查完成：补全人物实体 ${memoryBatches.length} 批、纪要 ${summaryBatches.length} 批，并修复缺失总述`)
         : '自动检查已停止';
       setBackfillStatus(total, total, message);
       setSummaryBackfillStatus(total, total, message);
       refreshMemoryPanel();
-      return { memoryBatches: memoryBatches.length, summaryBatches: summaryBatches.length, state };
+      return {
+        memoryBatches: memoryBatches.length,
+        summaryBatches: summaryBatches.length,
+        failedMemoryBatches,
+        failedSummaryBatches,
+        failedBigSummaries,
+        state
+      };
     } catch (error) {
       const message = `自动检查失败：${error?.message || error}`;
       setBackfillStatus(backfillStatus.current, backfillStatus.total, message);
