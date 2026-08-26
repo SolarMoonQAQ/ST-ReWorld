@@ -79,6 +79,10 @@ window.WORLD_ENGINE_CORE = (function() {
       },
       lastEvolveResult: null,
       _lastEvolvedMessageKey: '',
+      // 自动推进失败/推演期间到达的楼层，会在下次空闲时继续尝试
+      _pendingEvolutionQueue: [],
+      // 每个 AI 楼层的独立更新记录；世界当前状态仍由这些更新按顺序合并得到
+      floorUpdates: [],
       lastInjection: null,
       lastUpdated: {}
     };
@@ -224,6 +228,8 @@ window.WORLD_ENGINE_CORE = (function() {
   }
 
   function ensureArrays(state) {
+    if (!Array.isArray(state._pendingEvolutionQueue)) state._pendingEvolutionQueue = [];
+    if (!Array.isArray(state.floorUpdates)) state.floorUpdates = [];
     state.memories = state.memories || [];
     state.events = state.events || [];
     ensureEntityIds(state.events, ENTITY_ID_PREFIXES.events);

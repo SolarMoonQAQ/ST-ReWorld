@@ -223,7 +223,62 @@
       let isEvolving = false;
       let autoEvolveTimer = null;
       let lastProcessedMessageKey = '';
+      let pendingRetryTimer = null;
       const AUTO_EVOLVE_DELAY = 1500;
+
+      function queuePendingEvolution(messageKey, messageText) {
+        if (!messageKey || !messageText) return;
+        try {
+          const state = core.loadState();
+          const queue = Array.isArray(state._pendingEvolutionQueue) ? state._pendingEvolutionQueue : [];
+          const existing = queue.find(item => item && item.key === messageKey);
+          if (existing) {
+            existing.text = messageText;
+            existing.layer = core.getChatLayer();
+            existing.attempts = (Number(existing.attempts) || 0) + 1;
+            existing.lastQueuedAt = Date.now();
+          } else {
+            queue.push({ key: messageKey, text: messageText, layer: core.getChatLayer(), queuedAt: Date.now(), attempts: 0 });
+            state._pendingEvolutionQueue = queue.slice(-20);
+          }
+          state._pendingEvolutionQueue = queue.slice(-20);
+          if (!Array.isArray(state.floorUpdates)) state.floorUpdates = [];
+          const floorIndex = state.floorUpdates.findIndex(item => item && item.sourceKey === messageKey);
+          const floorRecord = {
+            aiLayer: core.getChatLayer(), sourceKey: messageKey, status: 'pending',
+            attempts: Number(existing?.attempts) || 0, updatedAt: Date.now()
+          };
+          if (floorIndex >= 0) state.floorUpdates[floorIndex] = { ...state.floorUpdates[floorIndex], ...floorRecord };
+          else state.floorUpdates.push(floorRecord);
+          state.floorUpdates = state.floorUpdates.slice(-200);
+          core.saveState(state);
+        } catch (e) { console.warn('[世界引擎] 保存待处理楼层失败', e); }
+      }
+
+      function removePendingEvolution(messageKey) {
+        if (!messageKey || !core.hasState()) return;
+        try {
+          const state = core.loadState();
+          const before = state._pendingEvolutionQueue?.length || 0;
+          state._pendingEvolutionQueue = (state._pendingEvolutionQueue || []).filter(item => item?.key !== messageKey);
+          if (state._pendingEvolutionQueue.length !== before) core.saveState(state);
+        } catch (_) {}
+      }
+
+      function schedulePendingRetry(delay = 4000) {
+        if (pendingRetryTimer) return;
+        pendingRetryTimer = setTimeout(async () => {
+          pendingRetryTimer = null;
+          const state = core.hasState() ? core.loadState() : null;
+          const ctx = SillyTavern.getContext();
+          const chat = ctx?.chat || [];
+          const lastMsg = chat[chat.length - 1];
+          if (!lastMsg || lastMsg.is_user || !String(lastMsg.mes || '').trim()) return;
+          const currentKey = getMessageKey(ctx, chat, lastMsg);
+          const item = (state?._pendingEvolutionQueue || []).find(entry => entry?.key === currentKey);
+          if (item) await runAutoEvolution(item.key, item.text, true);
+        }, delay);
+      }
 
       // ========== 注入管理 ==========
       const INJECTION_NAME = 'world-engine-world';
@@ -410,10 +465,15 @@
         );
       }
 
-      async function runAutoEvolution(expectedKey, expectedText) {
+      async function runAutoEvolution(expectedKey, expectedText, fromQueue = false) {
         autoEvolveTimer = null;
         if (api.getSettings(true).engineEnabled === false) return;
-        if (isEvolving || lastProcessedMessageKey === expectedKey) return;
+        if (lastProcessedMessageKey === expectedKey) return;
+        if (isEvolving || (evolution.isRunning && evolution.isRunning())) {
+          queuePendingEvolution(expectedKey, expectedText);
+          schedulePendingRetry();
+          return;
+        }
         // 已有推演（如手动触发）在跑：跳过本次自动推演，避免 evolve() 因 busy 返回 false 被误报为「推演失败」
         if (evolution.isRunning && evolution.isRunning()) return;
 
@@ -424,10 +484,18 @@
         if (!ctx || !lastMsg || lastMsg.is_user || !aiMsg) return;
 
         const currentKey = getMessageKey(ctx, chat, lastMsg);
-        if (currentKey !== expectedKey) return;
+        if (currentKey !== expectedKey) {
+          // 事件期间发生重 roll/新楼层时，旧楼层仍保留在队列中；当前消息另行调度。
+          if (fromQueue) {
+            removePendingEvolution(expectedKey);
+            onMessageReceived();
+          }
+          return;
+        }
         const storedState = core.hasState() ? core.loadState() : null;
         if (storedState?._lastEvolvedMessageKey === currentKey) {
           lastProcessedMessageKey = currentKey;
+          removePendingEvolution(currentKey);
           return;
         }
         if (aiMsg !== expectedText) {
@@ -440,6 +508,7 @@
         if (settings.evolveMode === 'manual') {
           // 手动模式：只由「手动推演」按钮触发，这里不做任何自动推演
           lastProcessedMessageKey = currentKey;
+          removePendingEvolution(currentKey);
           return;
         }
         const everyX = Math.max(1, parseInt(settings.evolveEveryX) || 1);
@@ -505,6 +574,7 @@
 
           if (!doEvolve) {
             lastProcessedMessageKey = currentKey;
+            removePendingEvolution(currentKey);
             const pos = c % everyX || (c === 0 ? 0 : everyX);
             setStatus(`第 ${pos}/${everyX} 轮，未到推演`);
             if (ui) ui.refresh(true);
@@ -513,7 +583,13 @@
         }
 
         const ok = await performEvolution(aiMsg, chat, timeStoryDay, timeReadRounds, { messageKey: currentKey });
-        if (ok) lastProcessedMessageKey = currentKey;
+        if (ok) {
+          lastProcessedMessageKey = currentKey;
+          removePendingEvolution(currentKey);
+        } else {
+          queuePendingEvolution(currentKey, aiMsg);
+          schedulePendingRetry(6000);
+        }
       }
 
       function setStatus(text, isErr) {
@@ -570,6 +646,22 @@
           const success = await evolution.evolve(state, opts.userMsg || '', aiMsg, evolveOpts);
           if (success) {
             if (opts.messageKey) state._lastEvolvedMessageKey = opts.messageKey;
+            if (opts.messageKey) {
+              if (!Array.isArray(state.floorUpdates)) state.floorUpdates = [];
+              const layer = core.getChatLayer();
+              const record = {
+                aiLayer: layer,
+                sourceKey: opts.messageKey,
+                status: 'valid',
+                worldDelta: state.lastEvolveResult || null,
+                stateAfterDigest: state.worldDigest || '',
+                updatedAt: Date.now()
+              };
+              const previous = state.floorUpdates.findIndex(item => item && item.sourceKey === opts.messageKey);
+              if (previous >= 0) state.floorUpdates[previous] = record;
+              else state.floorUpdates.push(record);
+              state.floorUpdates = state.floorUpdates.slice(-200);
+            }
             ledger.recordChanges(state);
             if (storyDay != null) { state.time = Number(storyDay); core.saveState(state); }
             // 世界 API 已经完成：先落库、更新注入并刷新世界界面，再开始记忆联动。
@@ -789,6 +881,10 @@
 
       // 初始化时立即按对话层数选择注入状态
       applyInjectionForCurrentRound();
+      try {
+        const pendingState = core.hasState() ? core.loadState() : null;
+        if (pendingState?._pendingEvolutionQueue?.length) schedulePendingRetry(2500);
+      } catch (_) {}
       // 暴露按对话层数选择的注入入口供手动调用
       window.WORLD_ENGINE = { applyInjection: applyInjectionForCurrentRound, manualEvolve, manualTimeEvolve, manualMemoryLink };
 

@@ -1022,7 +1022,12 @@ ${JSON.stringify(sample || [], null, 2)}
           throw error;
         }
         console.warn(`[世界引擎] API fault，自动重试 ${attempt + 1}/${maxRetries}:`, error && error.message ? error.message : error);
-        if (window.__WE_SetExternalStatus) window.__WE_SetExternalStatus(`API fault，自动重试 ${attempt + 1}/${maxRetries}`);
+        if (window.__WE_SetExternalStatus) window.__WE_SetExternalStatus(`API fault${error?.status === 429 ? '（429 限流）' : ''}，准备重试 ${attempt + 1}/${maxRetries}`);
+        const retryAfter = Number(error?.retryAfter);
+        const retryMs = Number.isFinite(retryAfter) && retryAfter > 0
+          ? Math.min(120000, retryAfter * 1000)
+          : Math.min(120000, 1500 * Math.pow(2, attempt) + Math.floor(Math.random() * 500));
+        await new Promise(resolve => setTimeout(resolve, retryMs));
       }
     }
     console.log('[世界引擎] API JSON 解析成功，世界摘要:', update.world_digest || '[未返回]');

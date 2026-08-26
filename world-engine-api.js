@@ -22,7 +22,8 @@ window.WORLD_ENGINE_API = (function() {
       model: 'gpt-3.5-turbo',
       temperature: 0.7,
       maxTokens: 65000,
-      apiAutoRetries: 0,
+      // 自动推进默认重试 2 次；429/网络波动会按 Retry-After 或指数退避等待
+      apiAutoRetries: 2,
       engineEnabled: true,
       firstLayerIsAiOpening: true,
       // [FIX] 连接方式：'direct'=浏览器直连（默认，原有行为）；'proxy'=经酒馆服务端转发，绕过第三方 API 的 CORS 限制
@@ -250,11 +251,17 @@ window.WORLD_ENGINE_API = (function() {
     }, signal, settings.apiTimeoutMs);
     const resp = result.resp;
     if (!resp.ok) {
-      throw new Error(`HTTP ${resp.status}: ${responseDetail(result)}`);
+      const error = new Error(`HTTP ${resp.status}: ${responseDetail(result)}`);
+      error.status = resp.status;
+      error.retryAfter = resp.headers?.get?.('Retry-After') || '';
+      throw error;
     }
     const data = requireJson(result, '酒馆代理');
     if (data && data.error) {
-      throw new Error('酒馆代理返回错误：' + (data.error.message || JSON.stringify(data.error)));
+      const error = new Error('酒馆代理返回错误：' + (data.error.message || JSON.stringify(data.error)));
+      error.status = Number(data.error.code || data.error.status) || undefined;
+      error.retryAfter = data.error.retry_after || data.error.retryAfter || '';
+      throw error;
     }
     const choice = data.choices?.[0];
     if (!choice) throw new Error('API 返回缺少 choices[0]');
@@ -318,7 +325,10 @@ window.WORLD_ENGINE_API = (function() {
     const resp = result.resp;
 
     if (!resp.ok) {
-      throw new Error(`HTTP ${resp.status}: ${responseDetail(result)}`);
+      const error = new Error(`HTTP ${resp.status}: ${responseDetail(result)}`);
+      error.status = resp.status;
+      error.retryAfter = resp.headers?.get?.('Retry-After') || '';
+      throw error;
     }
 
     const data = requireJson(result, 'API');
